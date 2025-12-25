@@ -1,0 +1,5 @@
+{
+  "name": "TradePulse - Divergence Scanner",
+  "description": "A professional-grade technical analysis dashboard detecting RSI and MACD divergences across multiple timeframes using a simulated market data engine.",
+  "requestFramePermissions": []
+}
