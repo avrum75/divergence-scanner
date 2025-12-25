@@ -15,7 +15,9 @@ const StarRating: React.FC<StarRatingProps> = ({ rating, onRatingChange, size = 
 
     const handleStarClick = (starValue: number, e: React.MouseEvent) => {
         e.stopPropagation(); // Prevent triggering parent click
-        onRatingChange(starValue);
+        // If clicking the same star as the current rating, toggle it off (set to 0)
+        const newRating = starValue === rating ? 0 : starValue;
+        onRatingChange(newRating);
     };
 
     const handleStarHover = (starValue: number) => {

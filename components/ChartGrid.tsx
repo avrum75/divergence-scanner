@@ -109,10 +109,8 @@ const ChartGrid: React.FC<ChartGridProps> = ({ tickerData, loading, onOpenTrade,
     const lastBar = data.length > 0 ? data[data.length - 1] : null;
     const lastBarTime = lastBar ? new Date(lastBar.time).getTime() : 0;
 
-    // Check if data is stale. For Daily, 24h might be too strict on weekends.
-    // Use 3 days (259200000ms) for tolerance, or check syncStatus if available.
-    // Ideally we rely on the backend syncStatus, but here we do a visual fallback.
-    const threshold = (tf === Timeframe.D1) ? 259200000 : 86400000;
+    // Relaxed threshold: 3 days (259200000ms) to account for weekends and holidays
+    const threshold = 259200000;
     const isOutOfSync = !lastBar || (now - lastBarTime > threshold);
 
     return (

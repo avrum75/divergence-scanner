@@ -9,6 +9,7 @@ export interface BarRecord extends OhlcvData {
 export interface WatchlistRecord {
     ticker: string;
     addedAt: string;
+    marketType: 'STOCKS' | 'CRYPTO'; // Market type for the ticker
 }
 
 export interface TickerRating {
@@ -42,14 +43,23 @@ export class DivergenceScannerDB extends Dexie {
 
     constructor() {
         super('DivergenceScannerDB');
-        // Bumped to version 8 to handle notes with dates and history
-        this.version(8).stores({
+        // Version 9: Add marketType to watchlist
+        this.version(9).stores({
             bars: '[ticker+timeframe+time]',
             trades: 'id, ticker, timestamp',
             watchlist: 'ticker',
             syncStatus: 'id',
             ratings: 'ticker',
             notes: 'ticker'
+        }).upgrade(async (tx) => {
+            // Migration: Add marketType to existing watchlist records
+            const watchlist = tx.table('watchlist');
+            await watchlist.toCollection().modify((record: any) => {
+                // Default existing records to STOCKS (crypto would have X: prefix)
+                if (!record.marketType) {
+                    record.marketType = record.ticker.startsWith('X:') ? 'CRYPTO' : 'STOCKS';
+                }
+            });
         });
     }
 }

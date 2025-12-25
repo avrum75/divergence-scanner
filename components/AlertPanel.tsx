@@ -13,6 +13,13 @@ interface AlertPanelProps {
   onRatingChange?: (ticker: string, rating: number) => void;
   tickerNotes?: Record<string, { note: string; date: string }[]>; // ticker -> array of notes with dates
   onNotesChange?: (ticker: string, note: string) => void; // Adds a new note entry
+  // Filter state props
+  filter?: FilterType;
+  onFilterChange?: (filter: FilterType) => void;
+  minDivergences?: number;
+  onMinDivergencesChange?: (minDivergences: number) => void;
+  sortByRating?: boolean;
+  onSortByRatingChange?: (sortByRating: boolean) => void;
 }
 
 type FilterType = 'ALL' | 'BULLISH' | 'BEARISH';
@@ -21,15 +28,51 @@ type FilterType = 'ALL' | 'BULLISH' | 'BEARISH';
 const AVAILABLE_TIMEFRAMES = Object.values(Timeframe);
 const MAX_TIMEFRAMES = AVAILABLE_TIMEFRAMES.length;
 
-const AlertPanel: React.FC<AlertPanelProps> = ({ alerts, onSelectAlert, loading, onScan, activeTicker, tickerRatings = {}, onRatingChange, tickerNotes = {}, onNotesChange }) => {
+const AlertPanel: React.FC<AlertPanelProps> = ({ 
+  alerts, 
+  onSelectAlert, 
+  loading, 
+  onScan, 
+  activeTicker, 
+  tickerRatings = {}, 
+  onRatingChange, 
+  tickerNotes = {}, 
+  onNotesChange,
+  filter: propFilter = 'ALL',
+  onFilterChange,
+  minDivergences: propMinDivergences = 1,
+  onMinDivergencesChange,
+  sortByRating: propSortByRating = false,
+  onSortByRatingChange
+}) => {
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<{ id: string, text: string } | null>(null);
-  const [filter, setFilter] = useState<FilterType>('ALL');
   const [showFilterPanel, setShowFilterPanel] = useState(false);
-  const [minDivergences, setMinDivergences] = useState<number>(1); // Default to "At least 1"
-  const [sortByRating, setSortByRating] = useState<boolean>(false);
   const [openNotesTicker, setOpenNotesTicker] = useState<string | null>(null);
   const [newNoteText, setNewNoteText] = useState<string>('');
+
+  // Use props if provided, otherwise use local state (for backward compatibility)
+  const filter = propFilter;
+  const minDivergences = propMinDivergences;
+  const sortByRating = propSortByRating;
+
+  const setFilter = (newFilter: FilterType) => {
+    if (onFilterChange) {
+      onFilterChange(newFilter);
+    }
+  };
+
+  const setMinDivergences = (newMinDivergences: number) => {
+    if (onMinDivergencesChange) {
+      onMinDivergencesChange(newMinDivergences);
+    }
+  };
+
+  const setSortByRating = (newSortByRating: boolean) => {
+    if (onSortByRatingChange) {
+      onSortByRatingChange(newSortByRating);
+    }
+  };
 
   const handleAIAnalysis = async (e: React.MouseEvent, alert: ConsolidatedAlert) => {
     e.stopPropagation();

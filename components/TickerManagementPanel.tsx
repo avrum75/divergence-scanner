@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { searchTickers } from '../services/dataService';
+import { searchTickers, MarketType } from '../services/dataService';
 import { TickerSearchResult } from '../types';
 
 interface TickerManagementPanelProps {
     tickers: string[];
-    onAddTicker: (ticker: string) => void;
+    onAddTicker: (ticker: string, marketType: MarketType) => void;
     onRemoveTicker: (ticker: string) => void;
     onSelectTicker: (ticker: string) => void;
     activeTicker?: string | null;
@@ -24,17 +24,54 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
     const [isLoading, setIsLoading] = useState(false);
     const [showDropdown, setShowDropdown] = useState(false);
     const [expandedNotesTicker, setExpandedNotesTicker] = useState<string | null>(null);
+    const [marketType, setMarketType] = useState<MarketType>(() => {
+        // Load from localStorage or default to STOCKS
+        const saved = localStorage.getItem('watchlistMarketType');
+        return (saved === 'CRYPTO' ? 'CRYPTO' : 'STOCKS') as MarketType;
+    });
     const dropdownRef = useRef<HTMLDivElement>(null);
+
+    // Filter tickers based on marketType from database
+    const [filteredTickers, setFilteredTickers] = useState<string[]>([]);
+    
+    // Load and filter tickers based on marketType
+    useEffect(() => {
+        const filterTickers = async () => {
+            const { db } = await import('../db');
+            const allWatchlist = await db.watchlist.toArray();
+            const filtered = allWatchlist
+                .filter(w => w.marketType === marketType)
+                .map(w => w.ticker);
+            setFilteredTickers(filtered);
+        };
+        filterTickers();
+    }, [marketType, tickers]); // Re-filter when marketType or tickers change
+
+    // Save market type to localStorage when it changes
+    useEffect(() => {
+        localStorage.setItem('watchlistMarketType', marketType);
+        // Clear search results when switching market type
+        setResults([]);
+        setShowDropdown(false);
+    }, [marketType]);
 
     // Debounce Search
     useEffect(() => {
         const timeoutId = setTimeout(async () => {
             if (inputValue.length >= 2) {
                 setIsLoading(true);
-                const data = await searchTickers(inputValue);
-                setResults(data);
-                setIsLoading(false);
-                setShowDropdown(true);
+                try {
+                    console.log(`🔍 Searching ${marketType} for: "${inputValue}"`);
+                    const data = await searchTickers(inputValue, marketType);
+                    console.log(`📊 Search results:`, data);
+                    setResults(data);
+                    setShowDropdown(true);
+                } catch (error) {
+                    console.error("❌ Search error:", error);
+                    setResults([]);
+                } finally {
+                    setIsLoading(false);
+                }
             } else {
                 setResults([]);
                 setShowDropdown(false);
@@ -42,7 +79,7 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
         }, 300);
 
         return () => clearTimeout(timeoutId);
-    }, [inputValue]);
+    }, [inputValue, marketType]);
 
     // Click outside to close
     useEffect(() => {
@@ -57,7 +94,7 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
     }, []);
 
     const handleAdd = (ticker: string) => {
-        onAddTicker(ticker.toUpperCase());
+        onAddTicker(ticker.toUpperCase(), marketType);
         setInputValue('');
         setResults([]);
         setShowDropdown(false);
@@ -73,12 +110,37 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
     return (
         <div className="flex flex-col h-full bg-slate-900 w-full animate-fade-in">
             <div className="p-4 border-b border-slate-800 bg-slate-900/50 backdrop-blur-sm">
-                <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center justify-between mb-2">
                     <h2 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-cyan-400">Watchlist</h2>
                     <span className="text-sm font-semibold text-slate-400 bg-slate-800 px-2 py-1 rounded">
-                        {tickers.length} {tickers.length === 1 ? 'stock' : 'stocks'}
+                        {filteredTickers.length} {filteredTickers.length === 1 ? 'asset' : 'assets'}
                     </span>
                 </div>
+                
+                {/* Market Type Selector */}
+                <div className="flex gap-2 mb-2">
+                    <button
+                        onClick={() => setMarketType('STOCKS')}
+                        className={`flex-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                            marketType === 'STOCKS'
+                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
+                                : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
+                        }`}
+                    >
+                        Stocks
+                    </button>
+                    <button
+                        onClick={() => setMarketType('CRYPTO')}
+                        className={`flex-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                            marketType === 'CRYPTO'
+                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
+                                : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
+                        }`}
+                    >
+                        Crypto
+                    </button>
+                </div>
+                
                 <p className="text-xs text-slate-400">Manage tracked assets</p>
             </div>
 
@@ -90,7 +152,7 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             onFocus={() => inputValue.length >= 2 && setShowDropdown(true)}
-                            placeholder="Search (e.g. Apple, BTC)"
+                            placeholder={marketType === 'CRYPTO' ? "Search (e.g. BTC, ETH, BNB)" : "Search (e.g. Apple, AAPL)"}
                             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all shadow-sm"
                         />
                         {isLoading && (
@@ -128,7 +190,7 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
             </div>
 
             <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-                {tickers.length === 0 && (
+                {filteredTickers.length === 0 && (
                     <div className="flex flex-col items-center justify-center h-40 text-slate-500 px-4 text-center opacity-60">
                         <svg className="w-10 h-10 mb-2 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -137,7 +199,7 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                     </div>
                 )}
 
-                {tickers.map((ticker) => {
+                {filteredTickers.map((ticker) => {
                     const hasNotes = tickerNotes[ticker] && tickerNotes[ticker].length > 0;
                     const isExpanded = expandedNotesTicker === ticker;
                     const notes = tickerNotes[ticker] || [];

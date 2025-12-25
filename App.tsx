@@ -20,6 +20,20 @@ function App() {
   const [scannedStockRatings, setScannedStockRatings] = useState<Record<string, number>>({});
   const [scannedStockNotes, setScannedStockNotes] = useState<Record<string, { note: string; date: string }[]>>({});
 
+  // Filter State (persisted in localStorage)
+  const [filter, setFilter] = useState<'ALL' | 'BULLISH' | 'BEARISH'>(() => {
+    const saved = localStorage.getItem('scannerFilter');
+    return (saved as 'ALL' | 'BULLISH' | 'BEARISH') || 'ALL';
+  });
+  const [minDivergences, setMinDivergences] = useState<number>(() => {
+    const saved = localStorage.getItem('scannerMinDivergences');
+    return saved ? parseInt(saved, 10) : 1;
+  });
+  const [sortByRating, setSortByRating] = useState<boolean>(() => {
+    const saved = localStorage.getItem('scannerSortByRating');
+    return saved === 'true';
+  });
+
   // Portfolio State
   const [trades, setTrades] = useState<Trade[]>([]);
   const [sidebarView, setSidebarView] = useState<SidebarView>('SCANNER');
@@ -67,8 +81,12 @@ function App() {
       if (savedWatchlist.length > 0) {
         setTrackedTickers(savedWatchlist.map(w => w.ticker));
       } else {
-        // First run: save initial tickers to DB
-        const records = INITIAL_TICKERS.map(ticker => ({ ticker, addedAt: new Date().toISOString() }));
+        // First run: save initial tickers to DB with STOCKS marketType
+        const records = INITIAL_TICKERS.map(ticker => ({ 
+          ticker, 
+          addedAt: new Date().toISOString(),
+          marketType: 'STOCKS' as const
+        }));
         await db.watchlist.bulkAdd(records);
         setTrackedTickers(INITIAL_TICKERS);
       }
@@ -134,14 +152,15 @@ function App() {
     }
   };
 
-  const handleAddTicker = async (ticker: string) => {
+  const handleAddTicker = async (ticker: string, marketType: 'STOCKS' | 'CRYPTO') => {
     if (!trackedTickers.includes(ticker)) {
       setTrackedTickers(prev => [...prev, ticker]);
-      // Check if record exists to preserve rating
-      const existing = await db.watchlist.get(ticker);
-      if (!existing) {
-        await db.watchlist.put({ ticker, addedAt: new Date().toISOString() });
-      }
+      // Save with marketType
+      await db.watchlist.put({ 
+        ticker, 
+        addedAt: new Date().toISOString(),
+        marketType 
+      });
     }
   };
 
@@ -154,6 +173,21 @@ function App() {
     setScannedStockRatings(prev => ({ ...prev, [ticker]: rating }));
     // Update in ratings table
     await db.ratings.put({ ticker, rating });
+  };
+
+  const handleFilterChange = (newFilter: 'ALL' | 'BULLISH' | 'BEARISH') => {
+    setFilter(newFilter);
+    localStorage.setItem('scannerFilter', newFilter);
+  };
+
+  const handleMinDivergencesChange = (newMinDivergences: number) => {
+    setMinDivergences(newMinDivergences);
+    localStorage.setItem('scannerMinDivergences', newMinDivergences.toString());
+  };
+
+  const handleSortByRatingChange = (newSortByRating: boolean) => {
+    setSortByRating(newSortByRating);
+    localStorage.setItem('scannerSortByRating', newSortByRating.toString());
   };
 
   const handleNotesChange = async (ticker: string, note: string) => {
@@ -263,6 +297,12 @@ function App() {
               onRatingChange={handleRatingChange}
               tickerNotes={scannedStockNotes}
               onNotesChange={handleNotesChange}
+              filter={filter}
+              onFilterChange={handleFilterChange}
+              minDivergences={minDivergences}
+              onMinDivergencesChange={handleMinDivergencesChange}
+              sortByRating={sortByRating}
+              onSortByRatingChange={handleSortByRatingChange}
             />
           ) : sidebarView === 'WATCHLIST' ? (
             <TickerManagementPanel
