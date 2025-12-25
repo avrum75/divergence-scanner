@@ -11,6 +11,22 @@ export interface WatchlistRecord {
     addedAt: string;
 }
 
+export interface TickerRating {
+    ticker: string;
+    rating: number; // 1-5 star rating
+}
+
+export interface NoteEntry {
+    note: string;
+    date: string; // ISO timestamp when note was written
+}
+
+export interface TickerNotes {
+    ticker: string;
+    notes: NoteEntry[]; // Array of notes with dates
+    updatedAt: string; // Last update timestamp
+}
+
 export interface SyncStatus {
     id: string; // "ticker:timeframe"
     lastSync: string; // ISO timestamp
@@ -21,15 +37,19 @@ export class DivergenceScannerDB extends Dexie {
     trades!: Table<Trade, string>;
     watchlist!: Table<WatchlistRecord, string>;
     syncStatus!: Table<SyncStatus, string>;
+    ratings!: Table<TickerRating, string>;
+    notes!: Table<TickerNotes, string>;
 
     constructor() {
         super('DivergenceScannerDB');
-        // Bumped to version 4 to handle sync status
-        this.version(4).stores({
+        // Bumped to version 8 to handle notes with dates and history
+        this.version(8).stores({
             bars: '[ticker+timeframe+time]',
             trades: 'id, ticker, timestamp',
             watchlist: 'ticker',
-            syncStatus: 'id'
+            syncStatus: 'id',
+            ratings: 'ticker',
+            notes: 'ticker'
         });
     }
 }

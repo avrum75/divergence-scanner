@@ -17,6 +17,8 @@ function App() {
   const [scanning, setScanning] = useState(false);
   const [loadingData, setLoadingData] = useState(false);
   const [trackedTickers, setTrackedTickers] = useState<string[]>(INITIAL_TICKERS);
+  const [scannedStockRatings, setScannedStockRatings] = useState<Record<string, number>>({});
+  const [scannedStockNotes, setScannedStockNotes] = useState<Record<string, { note: string; date: string }[]>>({});
 
   // Portfolio State
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -70,6 +72,27 @@ function App() {
         await db.watchlist.bulkAdd(records);
         setTrackedTickers(INITIAL_TICKERS);
       }
+
+      // Load ratings for scanned stocks
+      const savedRatings = await db.ratings.toArray();
+      const ratings: Record<string, number> = {};
+      savedRatings.forEach(r => {
+        ratings[r.ticker] = r.rating;
+      });
+      setScannedStockRatings(ratings);
+
+      // Load notes for scanned stocks
+      const savedNotes = await db.notes.toArray();
+      const notes: Record<string, { note: string; date: string }[]> = {};
+      savedNotes.forEach(n => {
+        // Handle migration: if notes is a string (old format), convert to array
+        if (typeof n.notes === 'string') {
+          notes[n.ticker] = [{ note: n.notes, date: n.updatedAt || new Date().toISOString() }];
+        } else if (Array.isArray(n.notes)) {
+          notes[n.ticker] = n.notes;
+        }
+      });
+      setScannedStockNotes(notes);
     };
     initDB();
   }, []);
@@ -114,13 +137,62 @@ function App() {
   const handleAddTicker = async (ticker: string) => {
     if (!trackedTickers.includes(ticker)) {
       setTrackedTickers(prev => [...prev, ticker]);
-      await db.watchlist.put({ ticker, addedAt: new Date().toISOString() });
+      // Check if record exists to preserve rating
+      const existing = await db.watchlist.get(ticker);
+      if (!existing) {
+        await db.watchlist.put({ ticker, addedAt: new Date().toISOString() });
+      }
     }
   };
 
   const handleRemoveTicker = async (ticker: string) => {
     setTrackedTickers(prev => prev.filter(t => t !== ticker));
     await db.watchlist.delete(ticker);
+  };
+
+  const handleRatingChange = async (ticker: string, rating: number) => {
+    setScannedStockRatings(prev => ({ ...prev, [ticker]: rating }));
+    // Update in ratings table
+    await db.ratings.put({ ticker, rating });
+  };
+
+  const handleNotesChange = async (ticker: string, note: string) => {
+    if (!note.trim()) return; // Don't save empty notes
+    
+    const newNoteEntry = {
+      note: note.trim(),
+      date: new Date().toISOString()
+    };
+
+    setScannedStockNotes(prev => {
+      const existingNotes = prev[ticker] || [];
+      return {
+        ...prev,
+        [ticker]: [...existingNotes, newNoteEntry]
+      };
+    });
+
+    // Update in notes table - append to existing notes array
+    const existingRecord = await db.notes.get(ticker);
+    if (existingRecord) {
+      const existingNotes = Array.isArray(existingRecord.notes) 
+        ? existingRecord.notes 
+        : typeof existingRecord.notes === 'string' 
+          ? [{ note: existingRecord.notes, date: existingRecord.updatedAt || new Date().toISOString() }]
+          : [];
+      await db.notes.put({
+        ticker,
+        notes: [...existingNotes, newNoteEntry],
+        updatedAt: new Date().toISOString()
+      });
+    } else {
+      // Create new record
+      await db.notes.put({
+        ticker,
+        notes: [newNoteEntry],
+        updatedAt: new Date().toISOString()
+      });
+    }
   };
 
   const handleOpenTrade = (ticker: string, price: number) => {
@@ -187,6 +259,10 @@ function App() {
               loading={scanning}
               onScan={handleScan}
               activeTicker={selectedTicker || undefined}
+              tickerRatings={scannedStockRatings}
+              onRatingChange={handleRatingChange}
+              tickerNotes={scannedStockNotes}
+              onNotesChange={handleNotesChange}
             />
           ) : sidebarView === 'WATCHLIST' ? (
             <TickerManagementPanel
@@ -195,6 +271,7 @@ function App() {
               onRemoveTicker={handleRemoveTicker}
               onSelectTicker={handleSelectTicker}
               activeTicker={selectedTicker}
+              tickerNotes={scannedStockNotes}
             />
           ) : (
             <PortfolioPanel

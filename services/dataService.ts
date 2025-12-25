@@ -65,15 +65,53 @@ const apiQueue = new RequestQueue();
  */
 const queuedFetch = async (url: string, priority: Priority): Promise<any> => {
   return apiQueue.enqueue(async () => {
-    console.log(`Queued API call: ${url.split('apiKey=')[0]}...`);
-    const resp = await fetch(url);
-    if (resp.status === 429) {
-      console.warn("429 Rate Limit! Waiting extra 30s...");
-      await new Promise(r => setTimeout(r, 30000));
-      // Re-queue it (though the class handles internal timing, 429 means we should back off even more)
-      return queuedFetch(url, priority);
+    let attempts = 0;
+    while (attempts < 5) { // Safety limit
+      attempts++;
+      console.log(`Queued API call (Try ${attempts}): ${url.split('apiKey=')[0]}...`);
+      const resp = await fetch(url);
+
+      // Handle rate limiting with exponential backoff
+      if (resp.status === 429) {
+        const backoffTime = Math.min(10000 * attempts, 30000); // Max 30s, exponential backoff
+        console.warn(`429 Rate Limit! Waiting ${backoffTime/1000}s...`);
+        await new Promise(r => setTimeout(r, backoffTime));
+        continue;
+      }
+
+      // Handle client errors (403, 404) - don't retry these
+      if (resp.status >= 400 && resp.status < 500) {
+        const errorText = await resp.text().catch(() => 'Unknown error');
+        // CRITICAL FIX: Don't log 403/404 errors for snapshot endpoints (expected for some tickers)
+        // 403 = Not authorized (plan limitation), 404 = Not found (ticker doesn't exist)
+        const isSnapshotEndpoint = url.includes('/snapshot/');
+        if (!(isSnapshotEndpoint && (resp.status === 403 || resp.status === 404))) {
+          console.error(`API Error ${resp.status} for ${url.split('apiKey=')[0]}: ${errorText.substring(0, 100)}`);
+        }
+        throw new Error(`API Error ${resp.status}: ${errorText.substring(0, 200)}`);
+      }
+
+      // Handle server errors (500+) - retry
+      if (resp.status >= 500) {
+        console.warn(`Server error ${resp.status}, retrying...`);
+        await new Promise(r => setTimeout(r, 1000 * attempts));
+        continue;
+      }
+
+      // Success - parse JSON
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+      }
+
+      try {
+        return await resp.json();
+      } catch (e) {
+        const text = await resp.text();
+        console.error(`JSON parse error for ${url.split('apiKey=')[0]}:`, text.substring(0, 200));
+        throw new Error(`Invalid JSON response: ${text.substring(0, 200)}`);
+      }
     }
-    return resp.json();
+    throw new Error(`Max retries exceeded for ${url}`);
   }, priority);
 };
 
@@ -88,17 +126,75 @@ const normalizeTicker = (ticker: string): string => {
   return cleanTicker;
 };
 
-// --- Core Sync Logic ---
+// --- Ticker Search ---
+
+import { TickerSearchResult } from '../types';
+
+export const searchTickers = async (query: string): Promise<TickerSearchResult[]> => {
+  if (!query || query.length < 2) return [];
+
+  const url = `https://api.polygon.io/v3/reference/tickers?search=${encodeURIComponent(query)}&active=true&sort=ticker&order=asc&limit=10&apiKey=${POLYGON_API_KEY}`;
+
+  try {
+    const data = await queuedFetch(url, Priority.HIGH);
+    if (data && data.results) {
+      return data.results.map((r: any) => ({
+        ticker: r.ticker,
+        name: r.name,
+        market: r.market,
+        type: r.type
+      }));
+    }
+    return [];
+  } catch (e) {
+    console.error("Ticker search failed", e);
+    return [];
+  }
+};
 
 /**
- * Fetches data from Polygon and caches it in IndexedDB
+ * Get ticker details (name, market, etc.) for a single ticker
  */
-const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boolean = false, priority: Priority = Priority.LOW): Promise<OhlcvData[]> => {
+export const getTickerDetails = async (ticker: string): Promise<TickerSearchResult | null> => {
+  const normalizedTicker = normalizeTicker(ticker);
+  const url = `https://api.polygon.io/v3/reference/tickers/${normalizedTicker}?apiKey=${POLYGON_API_KEY}`;
+
+  try {
+    const data = await queuedFetch(url, Priority.LOW);
+    // Polygon API returns single ticker data in data.results as an object
+    if (data && data.results) {
+      const r = data.results;
+      return {
+        ticker: r.ticker || normalizedTicker,
+        name: r.name || '',
+        market: r.market || '',
+        type: r.type || ''
+      };
+    }
+    return null;
+  } catch (e) {
+    // Silently fail - company name is optional
+    return null;
+  }
+};
+
+// --- Core Sync Logic ---
+
+// In-memory map to deduplicate concurrent requests for the same syncId
+const pendingSyncs = new Map<string, Promise<OhlcvData[]>>();
+
+/**
+ * Internal function: Actual sync logic
+ */
+const performSync = async (ticker: string, timeframe: Timeframe, force: boolean = false, priority: Priority = Priority.LOW): Promise<OhlcvData[]> => {
   const normalizedTicker = normalizeTicker(ticker);
   const syncId = `${normalizedTicker}:${timeframe}`;
 
+  // Use a local variable to track if we need to force sync (can't modify parameter)
+  let shouldForceSync = force;
+
   // 1. Check if we actually need to sync (Throttling)
-  if (!force) {
+  if (!shouldForceSync) {
     let status = await db.syncStatus.get(syncId);
     // Check the LATEST bar in the DB for this ticker/timeframe
     const latestBar = await db.bars
@@ -134,13 +230,24 @@ const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boole
     const lastBarTime = latestBar ? new Date(latestBar.time).getTime() : 0;
     const isStale = !latestBar || (now - lastBarTime > tfDuration * 1.5);
 
-    // Absolute Cutoff: If data is older than 24 hours AND we haven't synced recently (checked above),
-    // we should force a sync.
-    const isActuallyOld = !latestBar || (now - lastBarTime > 86400000);
+    // CRITICAL FIX: Validate that lastBarTime is not in the future
+    if (latestBar && lastBarTime > now) {
+      console.warn(`⚠️  Found future-dated bar for ${syncId}: ${latestBar.time}. Clearing corrupted data.`);
+      // Delete future-dated bars
+      await db.bars
+        .where('[ticker+timeframe+time]')
+        .between([normalizedTicker, timeframe, new Date(now).toISOString()], [normalizedTicker, timeframe, "\uffff"])
+        .delete();
+      // Force a fresh sync
+      shouldForceSync = true;
+    }
 
-    if (isActuallyOld && status) {
-      console.log(`🔄 Auto-forcing sync for ${syncId} - data is ${Math.round((now - lastBarTime) / 86400000)} days old`);
-      // We don't need to delete status, just let it proceed. The save at end will update timestamp.
+    // CRITICAL FIX: Always sync if data is stale (missing recent data) to fill gaps from last sync to current
+    // This ensures we always fetch missing data from last sync till current market data
+    if (isStale) {
+      const staleAge = latestBar ? Math.round((now - lastBarTime) / (1000 * 60 * 60)) : 0;
+      console.log(`🔄 Data is stale for ${syncId} (${staleAge}h old). Syncing to fill gap from last sync to current.`);
+      // Continue to sync logic - don't return cached data
     } else if (status && !isStale) {
       // Data is fresh enough and we possess a status -> return cached
       const cached = await db.bars
@@ -155,11 +262,12 @@ const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boole
   // 2. Identify starting point
   let fromDate: string;
 
-  if (force) {
+  if (shouldForceSync) {
     // Force mode: Get 6 months of data
     fromDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     await db.bars.where('[ticker+timeframe+time]').between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"]).delete();
   } else {
+    // Re-fetch lastBar after potential cleanup to ensure we have valid data
     const lastBar = await db.bars
       .where('[ticker+timeframe+time]')
       .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
@@ -167,17 +275,35 @@ const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boole
       .first();
 
     if (lastBar) {
-      // Continue from last bar with 1 day overlap
+      // Continue from last bar with 1 day overlap to ensure we fill any gaps
+      // This ensures we fetch missing data from last sync till current market data
       const d = new Date(lastBar.time);
-      d.setDate(d.getDate() - 1);
-      fromDate = d.toISOString().split('T')[0];
+      const now = Date.now();
+      // CRITICAL FIX: Ensure date is not in the future
+      if (d.getTime() > now) {
+        console.warn(`⚠️  Last bar has future date for ${syncId}: ${lastBar.time}. Using current date instead.`);
+        d.setTime(now);
+        // If we found a future date, force a fresh sync from 6 months ago
+        fromDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      } else {
+        // Start 1 day before last bar to ensure overlap and fill any gaps
+        d.setDate(d.getDate() - 1);
+        fromDate = d.toISOString().split('T')[0];
+      }
     } else {
-      // First sync: Only get last 3 months
-      fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      // First sync: Get last 6 months of historical data
+      fromDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     }
   }
 
+  // Always sync up to current date to ensure we have the most recent market data
   const toDate = new Date().toISOString().split('T')[0];
+  
+  // CRITICAL FIX: Validate date range
+  if (fromDate > toDate) {
+    console.error(`❌ Invalid date range for ${syncId}: ${fromDate} > ${toDate}. Resetting.`);
+    fromDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  }
   let multiplier = 1;
   let timespan = 'day';
   if (timeframe === Timeframe.H4) { multiplier = 4; timespan = 'hour'; }
@@ -187,6 +313,8 @@ const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boole
 
   let currentStart = fromDate;
   let hasMore = true;
+  let consecutiveErrors = 0;
+  const maxConsecutiveErrors = 3;
 
   while (hasMore) {
     if (currentStart > toDate) break;
@@ -196,9 +324,34 @@ const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boole
     try {
       console.log(`🔍 Fetching ${syncId} from ${currentStart}...`);
       const data = await queuedFetch(url, priority);
+      
+      // Reset error counter on success
+      consecutiveErrors = 0;
+      
       if (data && data.results && data.results.length > 0) {
         console.log(`📥 Received ${data.results.length} bars for ${syncId}`);
-        const newBars: BarRecord[] = data.results.map((r: any) => ({
+        
+        // CRITICAL FIX: Filter out future-dated bars before saving
+        const now = Date.now();
+        const validBars = data.results.filter((r: any) => {
+          const barTime = new Date(r.t).getTime();
+          return barTime <= now;
+        });
+        
+        if (validBars.length < data.results.length) {
+          console.warn(`⚠️  Filtered out ${data.results.length - validBars.length} future-dated bars for ${syncId}`);
+        }
+        
+        if (validBars.length === 0) {
+          console.warn(`⚠️  No valid bars received for ${syncId}, advancing date`);
+          const nextStart = new Date(currentStart);
+          nextStart.setDate(nextStart.getDate() + 1);
+          currentStart = nextStart.toISOString().split('T')[0];
+          if (currentStart > toDate) hasMore = false;
+          continue;
+        }
+        
+        const newBars: BarRecord[] = validBars.map((r: any) => ({
           ticker: normalizedTicker,
           timeframe,
           time: new Date(r.t).toISOString(),
@@ -208,26 +361,38 @@ const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boole
         await db.bars.bulkPut(newBars);
 
         // ADVANCE logic: We always advance by at least 1 day from the last bar received
-        const lastT = data.results[data.results.length - 1].t;
+        const lastT = validBars[validBars.length - 1].t;
         const lastDate = new Date(lastT).toISOString().split('T')[0];
 
+        // CRITICAL FIX: Validate lastDate is not in the future
+        if (lastDate > toDate) {
+          console.warn(`⚠️  Last bar date ${lastDate} is in the future for ${syncId}. Stopping sync.`);
+          hasMore = false;
+          break;
+        }
+
         if (lastDate === currentStart) {
-          // If the last bar is on the SAME day as currentStart, we must increment currentStart
-          // to avoid hitting the same window again.
           const next = new Date(lastT);
           next.setDate(next.getDate() + 1);
           currentStart = next.toISOString().split('T')[0];
         } else {
-          // CRITICAL FIX: Always advance past the last bar to avoid infinite loop
           const next = new Date(lastT);
           next.setDate(next.getDate() + 1);
           currentStart = next.toISOString().split('T')[0];
         }
 
-        // If we reach "Today" or the batch was less than limit (with safety margin), we stop.
-        if (currentStart >= toDate || data.results.length < 4750) {
+        // CRITICAL FIX: Check if the last bar is recent before stopping
+        const lastBarTime = new Date(validBars[validBars.length - 1].t).getTime();
+        let tfDuration = (timeframe === Timeframe.D1) ? 86400000 : (timeframe === Timeframe.H4 ? 14400000 : 3600000);
+        const isLastBarRecent = (now - lastBarTime) < tfDuration * 2; // Within 2 periods
+        
+        // If we reach "Today" or the batch was less than limit AND the last bar is recent, we stop.
+        if (currentStart >= toDate || (validBars.length < 4750 && isLastBarRecent)) {
           console.log(`🎯 Sync finished for ${syncId} (reached target or < limit)`);
           hasMore = false;
+        } else if (validBars.length < 4750 && !isLastBarRecent) {
+          // Small batch but data is old - continue syncing
+          console.log(`📊 Small batch received but data is old (last bar: ${new Date(lastBarTime).toISOString()}), continuing sync...`);
         }
       } else {
         // GAP LEAPFROG: If no data returned, advance by a week to skip holidays/thin data
@@ -238,9 +403,30 @@ const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boole
         console.log(`⏭️  Leapfrogging gap for ${syncId}. New start: ${currentStart}`);
         if (currentStart > toDate) hasMore = false;
       }
-    } catch (e) {
-      console.error(`❌ Sync loop error for ${syncId}:`, e);
-      hasMore = false;
+    } catch (e: any) {
+      consecutiveErrors++;
+      console.error(`❌ Sync loop error for ${syncId} (${consecutiveErrors}/${maxConsecutiveErrors}):`, e.message || e);
+      
+      // CRITICAL FIX: Stop after too many consecutive errors to prevent infinite loops
+      if (consecutiveErrors >= maxConsecutiveErrors) {
+        console.error(`❌ Too many consecutive errors for ${syncId}. Stopping sync.`);
+        hasMore = false;
+        break;
+      }
+      
+      // For client errors (403, 404), don't retry - just stop
+      if (e.message && e.message.includes('API Error 4')) {
+        console.error(`❌ Client error for ${syncId}. Stopping sync.`);
+        hasMore = false;
+        break;
+      }
+      
+      // For other errors, wait a bit and try to advance
+      await new Promise(r => setTimeout(r, 2000));
+      const nextStart = new Date(currentStart);
+      nextStart.setDate(nextStart.getDate() + 1);
+      currentStart = nextStart.toISOString().split('T')[0];
+      if (currentStart > toDate) hasMore = false;
     }
   }
 
@@ -251,12 +437,21 @@ const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boole
     .reverse()
     .first();
 
-  const isCurrent = checkLastBar && (Date.now() - new Date(checkLastBar.time).getTime() < 86400000 * 2);
+  // CRITICAL FIX: Use timeframe-appropriate staleness check
+  const now = Date.now();
+  let stalenessThreshold = 86400000 * 2; // 2 days default
+  if (timeframe === Timeframe.H1) stalenessThreshold = 2 * 60 * 60 * 1000; // 2 hours
+  else if (timeframe === Timeframe.H4) stalenessThreshold = 8 * 60 * 60 * 1000; // 8 hours
+  
+  const isCurrent = checkLastBar && (now - new Date(checkLastBar.time).getTime() < stalenessThreshold);
   if (isCurrent) {
     await db.syncStatus.put({ id: syncId, lastSync: new Date().toISOString() });
     console.log(`✅ Sync completed for ${syncId} - now current`);
+  } else if (checkLastBar) {
+    const lastBarAge = Math.round((now - new Date(checkLastBar.time).getTime()) / (1000 * 60 * 60));
+    console.log(`⚠️  Sync finished for ${syncId} but data still appears old (last bar is ${lastBarAge}h old)`);
   } else {
-    console.log(`⚠️  Sync finished for ${syncId} but data still appears old`);
+    console.log(`⚠️  Sync finished for ${syncId} but no data was saved`);
   }
 
   const final = await db.bars
@@ -265,6 +460,27 @@ const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boole
     .toArray();
 
   return final.sort((a, b) => a.time.localeCompare(b.time));
+};
+
+/**
+ * Limit concurrent calls to sync ticker data
+ */
+export const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boolean = false, priority: Priority = Priority.LOW): Promise<OhlcvData[]> => {
+  const normalizedTicker = normalizeTicker(ticker);
+  const syncId = `${normalizedTicker}:${timeframe}`;
+
+  if (pendingSyncs.has(syncId)) {
+    console.log(`⚡️ Joining existing sync for ${syncId}`);
+    return pendingSyncs.get(syncId)!;
+  }
+
+  const promise = performSync(ticker, timeframe, force, priority)
+    .finally(() => {
+      pendingSyncs.delete(syncId);
+    });
+
+  pendingSyncs.set(syncId, promise);
+  return promise;
 };
 
 /**
@@ -342,8 +558,15 @@ const fetchLatestPrice = async (ticker: string, priority: Priority = Priority.LO
         };
       }
     }
-  } catch (e) {
-    console.error(`Snapshot fetch failed for ${ticker}:`, e);
+  } catch (e: any) {
+    // CRITICAL FIX: Silently handle 403/404 errors for snapshot endpoints
+    // 403 = Not authorized (plan limitation - some crypto tickers require higher plan)
+    // 404 = Not found (ticker doesn't exist or doesn't have snapshot data)
+    if (e.message && (e.message.includes('API Error 403') || e.message.includes('API Error 404'))) {
+      // Silently handle these - they're expected for some tickers
+      return null;
+    }
+    console.warn(`Snapshot fetch failed for ${ticker}:`, e.message || e);
   }
   return null;
 };
@@ -354,13 +577,24 @@ const fetchLatestPrice = async (ticker: string, priority: Priority = Priority.LO
 export const fetchTickerData = async (symbol: string, force: boolean = false, priorityLevel: 'HIGH' | 'LOW' = 'LOW'): Promise<TickerData> => {
   const p = priorityLevel === 'HIGH' ? Priority.HIGH : Priority.LOW;
 
-  // 1. Concurrent Sync (They go into the queue and sort by priority)
-  const [d1Data, h4Data, h1Data, liveSnapshot] = await Promise.all([
-    syncTickerData(symbol, Timeframe.D1, force, p),
-    syncTickerData(symbol, Timeframe.H4, force, p),
-    syncTickerData(symbol, Timeframe.H1, force, p),
-    fetchLatestPrice(symbol, p)
-  ]);
+  // CRITICAL FIX: Stagger requests instead of concurrent to avoid rate limits
+  // Fetch timeframes sequentially with small delays, snapshot can be parallel
+  const d1Data = await syncTickerData(symbol, Timeframe.D1, force, p);
+  await new Promise(r => setTimeout(r, 300)); // Small delay between requests
+  
+  const h4Data = await syncTickerData(symbol, Timeframe.H4, force, p);
+  await new Promise(r => setTimeout(r, 300));
+  
+  const h1Data = await syncTickerData(symbol, Timeframe.H1, force, p);
+  await new Promise(r => setTimeout(r, 300));
+  
+  // Snapshot can fail gracefully, so we don't await it blocking
+  const liveSnapshotPromise = fetchLatestPrice(symbol, p).catch(e => {
+    console.warn(`Snapshot fetch failed for ${symbol}, continuing with cached data:`, e.message);
+    return null;
+  });
+
+  const liveSnapshot = await liveSnapshotPromise;
 
   // 2. Strict Price Unification Policy
   // Check if all timeframes are within their expected range of "Now"

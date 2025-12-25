@@ -65,6 +65,13 @@ export interface Trade {
   pnlPercent?: number; // Snapshot for simulation
 }
 
+export interface TickerSearchResult {
+  ticker: string;
+  name: string;
+  market: string;
+  type?: string;
+}
+
 export interface TickerData {
   symbol: string;
   data: Record<Timeframe, IndicatorData[]>;

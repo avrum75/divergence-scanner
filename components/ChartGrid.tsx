@@ -1,7 +1,8 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { IChartApi, LogicalRange } from 'lightweight-charts';
 import { TickerData, Timeframe, IndicatorType } from '../types';
 import TradingViewChart from './TradingViewChart';
+import { getTickerDetails } from '../services/dataService';
 
 interface ChartGridProps {
   tickerData: TickerData | null;
@@ -17,9 +18,28 @@ const ChartGrid: React.FC<ChartGridProps> = ({ tickerData, loading, onOpenTrade,
   // Track synchronization state to prevent infinite loops
   const chartSyncRef = useRef(false);
 
+  // Store company name for the current ticker
+  const [companyName, setCompanyName] = useState<string | null>(null);
+
   // Clear refs when data changes to prevent memory leaks/stale references
   useEffect(() => {
     chartGroups.current = {};
+  }, [tickerData?.symbol]);
+
+  // Fetch company name when ticker changes
+  useEffect(() => {
+    if (tickerData?.symbol) {
+      setCompanyName(null); // Reset while loading
+      getTickerDetails(tickerData.symbol).then(details => {
+        if (details) {
+          setCompanyName(details.name);
+        }
+      }).catch(() => {
+        // Silently fail - company name is optional
+      });
+    } else {
+      setCompanyName(null);
+    }
   }, [tickerData?.symbol]);
 
   const registerChart = (tf: Timeframe, chart: IChartApi) => {
@@ -88,7 +108,12 @@ const ChartGrid: React.FC<ChartGridProps> = ({ tickerData, loading, onOpenTrade,
     const now = Date.now();
     const lastBar = data.length > 0 ? data[data.length - 1] : null;
     const lastBarTime = lastBar ? new Date(lastBar.time).getTime() : 0;
-    const isOutOfSync = !lastBar || (now - lastBarTime > 86400000); // 24 hours
+
+    // Check if data is stale. For Daily, 24h might be too strict on weekends.
+    // Use 3 days (259200000ms) for tolerance, or check syncStatus if available.
+    // Ideally we rely on the backend syncStatus, but here we do a visual fallback.
+    const threshold = (tf === Timeframe.D1) ? 259200000 : 86400000;
+    const isOutOfSync = !lastBar || (now - lastBarTime > threshold);
 
     return (
       <div className={`flex flex-col h-full bg-slate-900 border rounded-lg overflow-hidden transition-all relative ${isOutOfSync ? 'border-amber-500/50' : 'border-slate-800'}`}>
@@ -155,6 +180,9 @@ const ChartGrid: React.FC<ChartGridProps> = ({ tickerData, loading, onOpenTrade,
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold text-white flex items-center gap-2">
           {tickerData.symbol}
+          {companyName && (
+            <span className="text-slate-400 font-normal text-lg">- {companyName}</span>
+          )}
           <button
             onClick={onRefresh}
             className="p-1 hover:bg-slate-800 rounded transition-colors"
