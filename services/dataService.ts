@@ -346,6 +346,27 @@ export const getTickerDetails = async (ticker: string): Promise<TickerSearchResu
 // In-memory map to deduplicate concurrent requests for the same syncId
 const pendingSyncs = new Map<string, Promise<OhlcvData[]>>();
 
+// Observer pattern to notify UI of sync status changes
+type SyncListener = (syncingTickers: Set<string>) => void;
+const syncListeners = new Set<SyncListener>();
+
+const notifySyncListeners = () => {
+  const tickers = new Set<string>();
+  pendingSyncs.forEach((_, key) => {
+    tickers.add(key.split(':')[0]);
+  });
+  syncListeners.forEach(listener => listener(tickers));
+};
+
+export const subscribeToSyncs = (listener: SyncListener) => {
+  syncListeners.add(listener);
+  // Initial notification
+  const tickers = new Set<string>();
+  pendingSyncs.forEach((_, key) => tickers.add(key.split(':')[0]));
+  listener(tickers);
+  return () => { syncListeners.delete(listener); };
+};
+
 /**
  * Lightweight check: Fetch only the latest bar to see if there's new data
  * Returns the latest bar timestamp, or null if no data available
@@ -743,9 +764,11 @@ export const syncTickerData = async (ticker: string, timeframe: Timeframe, force
   const promise = performSync(ticker, timeframe, force, priority)
     .finally(() => {
       pendingSyncs.delete(syncId);
+      notifySyncListeners();
     });
 
   pendingSyncs.set(syncId, promise);
+  notifySyncListeners();
   return promise;
 };
 

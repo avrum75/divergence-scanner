@@ -10,6 +10,7 @@ interface TickerManagementPanelProps {
     activeTicker?: string | null;
     tickerNotes?: Record<string, { note: string; date: string }[]>; // ticker -> array of notes with dates
     openTrades?: Set<string>;
+    syncingTickers?: Set<string>;
 }
 
 const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
@@ -19,7 +20,8 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
     onSelectTicker,
     activeTicker,
     tickerNotes = {},
-    openTrades = new Set()
+    openTrades = new Set(),
+    syncingTickers = new Set()
 }) => {
     const [inputValue, setInputValue] = useState('');
     const [results, setResults] = useState<TickerSearchResult[]>([]);
@@ -124,8 +126,8 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                     <button
                         onClick={() => setMarketType('STOCKS')}
                         className={`flex-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${marketType === 'STOCKS'
-                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
-                                : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
+                            ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
+                            : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
                             }`}
                     >
                         Stocks
@@ -133,8 +135,8 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                     <button
                         onClick={() => setMarketType('CRYPTO')}
                         className={`flex-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${marketType === 'CRYPTO'
-                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
-                                : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
+                            ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
+                            : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
                             }`}
                     >
                         Crypto
@@ -218,9 +220,14 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                                     }`}
                             >
                                 <div className="flex flex-col">
-                                    <span className={`font-bold text-lg ${ticker === activeTicker ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
-                                        {ticker}
-                                    </span>
+                                    <div className="flex items-center gap-2">
+                                        <span className={`font-bold text-lg ${ticker === activeTicker ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
+                                            {ticker}
+                                        </span>
+                                        {syncingTickers.has(ticker) && (
+                                            <div className="w-3 h-3 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin shadow-[0_0_5px_rgba(99,102,241,0.4)]"></div>
+                                        )}
+                                    </div>
                                     {openTrades.has(ticker) && (
                                         <span className="text-[8px] font-black bg-emerald-500 text-emerald-950 px-1.5 py-0.5 rounded-sm w-fit mt-0.5 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.2)]">
                                             TRADING
@@ -235,8 +242,8 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                                                 setExpandedNotesTicker(isExpanded ? null : ticker);
                                             }}
                                             className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${isExpanded
-                                                    ? 'bg-yellow-500/30 text-yellow-300'
-                                                    : 'bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400'
+                                                ? 'bg-yellow-500/30 text-yellow-300'
+                                                : 'bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400'
                                                 }`}
                                             title={isExpanded ? 'Hide notes' : 'Show notes'}
                                         >

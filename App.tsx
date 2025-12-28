@@ -4,7 +4,7 @@ import PortfolioPanel from './components/PortfolioPanel';
 import TickerManagementPanel from './components/TickerManagementPanel';
 import ChartGrid from './components/ChartGrid';
 import DocumentationModal from './components/DocumentationModal';
-import { scanMarket, fetchTickerData, getCachedTickerData } from './services/dataService';
+import { scanMarket, fetchTickerData, getCachedTickerData, subscribeToSyncs } from './services/dataService';
 import { Alert, TickerData, Trade, Timeframe, ConsolidatedAlert } from './types';
 import { TICKERS as INITIAL_TICKERS } from './constants';
 import { db } from './db';
@@ -22,6 +22,7 @@ function App() {
   const [scannedStockRatings, setScannedStockRatings] = useState<Record<string, number>>({});
   const [scannedStockNotes, setScannedStockNotes] = useState<Record<string, { note: string; date: string }[]>>({});
   const [backlog, setBacklog] = useState<Set<string>>(new Set());
+  const [syncingTickers, setSyncingTickers] = useState<Set<string>>(new Set());
   const [hideBacklogged, setHideBacklogged] = useState<boolean>(() => {
     const saved = localStorage.getItem('scannerHideBacklogged');
     return saved === 'true';
@@ -162,6 +163,13 @@ function App() {
       setBacklog(new Set(savedBacklog.map(b => b.ticker)));
     };
     initDB();
+
+    // Subscribe to global sync changes
+    const unsubscribe = subscribeToSyncs((tickers) => {
+      setSyncingTickers(tickers);
+    });
+
+    return () => unsubscribe();
   }, []);
 
   // Initial Scan - now depends on trackedTickers
@@ -371,6 +379,13 @@ function App() {
     setSidebarView('PORTFOLIO'); // Switch to portfolio view to see the new trade
   };
 
+  const activeSyncingTickers = new Set(syncingTickers);
+  if (selectedTicker && tickerData?.syncStatus) {
+    if (Object.values(tickerData.syncStatus).some(s => !s)) {
+      activeSyncingTickers.add(selectedTicker);
+    }
+  }
+
   return (
     <div className="flex h-screen w-screen bg-slate-950 text-slate-100 font-sans relative">
       {/* Moved Account Menu to Top Right */}
@@ -489,6 +504,7 @@ function App() {
               enabledTimeframes={enabledTimeframes}
               onEnabledTimeframesChange={handleEnabledTimeframesChange}
               openTrades={new Set(trades.map(t => t.ticker))}
+              syncingTickers={activeSyncingTickers}
             />
           ) : sidebarView === 'WATCHLIST' ? (
             <TickerManagementPanel
@@ -499,6 +515,7 @@ function App() {
               activeTicker={selectedTicker}
               tickerNotes={scannedStockNotes}
               openTrades={new Set(trades.map(t => t.ticker))}
+              syncingTickers={activeSyncingTickers}
             />
           ) : (
             <PortfolioPanel

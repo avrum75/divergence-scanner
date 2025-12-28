@@ -43,6 +43,7 @@ interface AlertPanelProps {
   enabledTimeframes?: Timeframe[];
   onEnabledTimeframesChange?: (timeframes: Timeframe[]) => void;
   openTrades?: Set<string>;
+  syncingTickers?: Set<string>;
 }
 
 type FilterType = 'ALL' | 'BULLISH' | 'BEARISH';
@@ -87,7 +88,8 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
   onScanSensitivityChange,
   enabledTimeframes = AVAILABLE_TIMEFRAMES,
   onEnabledTimeframesChange,
-  openTrades = new Set()
+  openTrades = new Set(),
+  syncingTickers = new Set()
 }) => {
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<{ id: string, text: string } | null>(null);
@@ -482,7 +484,12 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
             )}
             <div className="flex justify-between items-start mb-2">
               <div className="flex flex-col">
-                <span className="font-bold text-lg text-white">{alert.ticker}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-lg text-white">{alert.ticker}</span>
+                  {syncingTickers.has(alert.ticker) && (
+                    <div className="w-3 h-3 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
+                  )}
+                </div>
                 {openTrades.has(alert.ticker) && (
                   <span className="text-[9px] font-black bg-emerald-500 text-emerald-950 px-1.5 py-0.5 rounded-sm w-fit mt-1 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.3)]">
                     TRADING
