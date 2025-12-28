@@ -33,6 +33,11 @@ export interface SyncStatus {
     lastSync: string; // ISO timestamp
 }
 
+export interface BacklogRecord {
+    ticker: string;
+    addedAt: string;
+}
+
 export class DivergenceScannerDB extends Dexie {
     bars!: Table<BarRecord, [string, string, string]>;
     trades!: Table<Trade, string>;
@@ -40,9 +45,21 @@ export class DivergenceScannerDB extends Dexie {
     syncStatus!: Table<SyncStatus, string>;
     ratings!: Table<TickerRating, string>;
     notes!: Table<TickerNotes, string>;
+    backlog!: Table<BacklogRecord, string>;
 
     constructor() {
         super('DivergenceScannerDB');
+        // Version 10: Add backlog table
+        this.version(10).stores({
+            bars: '[ticker+timeframe+time]',
+            trades: 'id, ticker, timestamp',
+            watchlist: 'ticker',
+            syncStatus: 'id',
+            ratings: 'ticker',
+            notes: 'ticker',
+            backlog: 'ticker'
+        });
+
         // Version 9: Add marketType to watchlist
         this.version(9).stores({
             bars: '[ticker+timeframe+time]',

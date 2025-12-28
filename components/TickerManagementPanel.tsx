@@ -9,6 +9,7 @@ interface TickerManagementPanelProps {
     onSelectTicker: (ticker: string) => void;
     activeTicker?: string | null;
     tickerNotes?: Record<string, { note: string; date: string }[]>; // ticker -> array of notes with dates
+    openTrades?: Set<string>;
 }
 
 const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
@@ -17,7 +18,8 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
     onRemoveTicker,
     onSelectTicker,
     activeTicker,
-    tickerNotes = {}
+    tickerNotes = {},
+    openTrades = new Set()
 }) => {
     const [inputValue, setInputValue] = useState('');
     const [results, setResults] = useState<TickerSearchResult[]>([]);
@@ -33,7 +35,7 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
 
     // Filter tickers based on marketType from database
     const [filteredTickers, setFilteredTickers] = useState<string[]>([]);
-    
+
     // Load and filter tickers based on marketType
     useEffect(() => {
         const filterTickers = async () => {
@@ -116,31 +118,29 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                         {filteredTickers.length} {filteredTickers.length === 1 ? 'asset' : 'assets'}
                     </span>
                 </div>
-                
+
                 {/* Market Type Selector */}
                 <div className="flex gap-2 mb-2">
                     <button
                         onClick={() => setMarketType('STOCKS')}
-                        className={`flex-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                            marketType === 'STOCKS'
+                        className={`flex-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${marketType === 'STOCKS'
                                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
                                 : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
-                        }`}
+                            }`}
                     >
                         Stocks
                     </button>
                     <button
                         onClick={() => setMarketType('CRYPTO')}
-                        className={`flex-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                            marketType === 'CRYPTO'
+                        className={`flex-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${marketType === 'CRYPTO'
                                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
                                 : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
-                        }`}
+                            }`}
                     >
                         Crypto
                     </button>
                 </div>
-                
+
                 <p className="text-xs text-slate-400">Manage tracked assets</p>
             </div>
 
@@ -204,7 +204,7 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                     const isExpanded = expandedNotesTicker === ticker;
                     const notes = tickerNotes[ticker] || [];
                     // Sort notes from newest to oldest
-                    const sortedNotes = [...notes].sort((a, b) => 
+                    const sortedNotes = [...notes].sort((a, b) =>
                         new Date(b.date).getTime() - new Date(a.date).getTime()
                     );
 
@@ -217,9 +217,16 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                                     : 'bg-slate-800/40 border-slate-700/50 hover:bg-slate-800 hover:border-slate-600 hover:translate-x-0.5'
                                     }`}
                             >
-                                <span className={`font-bold text-lg ${ticker === activeTicker ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
-                                    {ticker}
-                                </span>
+                                <div className="flex flex-col">
+                                    <span className={`font-bold text-lg ${ticker === activeTicker ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
+                                        {ticker}
+                                    </span>
+                                    {openTrades.has(ticker) && (
+                                        <span className="text-[8px] font-black bg-emerald-500 text-emerald-950 px-1.5 py-0.5 rounded-sm w-fit mt-0.5 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.2)]">
+                                            TRADING
+                                        </span>
+                                    )}
+                                </div>
                                 <div className="flex items-center gap-1">
                                     {hasNotes && (
                                         <button
@@ -227,11 +234,10 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                                                 e.stopPropagation();
                                                 setExpandedNotesTicker(isExpanded ? null : ticker);
                                             }}
-                                            className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${
-                                                isExpanded
+                                            className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${isExpanded
                                                     ? 'bg-yellow-500/30 text-yellow-300'
                                                     : 'bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400'
-                                            }`}
+                                                }`}
                                             title={isExpanded ? 'Hide notes' : 'Show notes'}
                                         >
                                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -253,7 +259,7 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                                     </button>
                                 </div>
                             </div>
-                            
+
                             {/* Expanded Notes Section */}
                             {isExpanded && sortedNotes.length > 0 && (
                                 <div className="mt-1 mb-2 ml-2 mr-2 p-3 bg-slate-900/80 rounded-lg border border-slate-700/50">

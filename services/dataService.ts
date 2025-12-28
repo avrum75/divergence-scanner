@@ -18,8 +18,8 @@ type Task = () => Promise<any>;
 class RequestQueue {
   private queue: { task: Task; priority: Priority; resolve: (val: any) => void; reject: (err: any) => void }[] = [];
   private lastCallTime = 0;
-  private minInterval = 10; // Paid tier: very low interval (e.g. 10ms for 100 req/sec)
-  private maxConcurrent = 10; // Process up to 10 requests concurrently
+  private minInterval = 5; // Paid tier: very low interval
+  private maxConcurrent = 20; // Process up to 20 requests concurrently
   private currentActive = 0;
   private processing = false;
 
@@ -146,10 +146,10 @@ const normalizeTicker = (ticker: string): string => {
     return cleanTicker;
   }
 
-  // Legacy support: convert common crypto symbols to Polygon format
+  // Legacy support/defaults: convert common crypto symbols to Binance USDT format
   const crypto = ['BTC', 'ETH', 'SOL', 'ADA', 'DOT', 'DOGE', 'MATIC', 'POL'];
   if (crypto.includes(cleanTicker)) {
-    return `X:${cleanTicker}USD`;
+    return `X:${cleanTicker}USDT`;
   }
 
   return cleanTicker;
@@ -352,20 +352,33 @@ const pendingSyncs = new Map<string, Promise<OhlcvData[]>>();
  */
 const checkForUpdates = async (ticker: string, timeframe: Timeframe, priority: Priority): Promise<string | null> => {
   const normalizedTicker = normalizeTicker(ticker);
-  const multiplier = timeframe === Timeframe.D1 ? 1 : (timeframe === Timeframe.H4 ? 4 : 1);
-  const timespan = timeframe === Timeframe.D1 ? 'day' : 'hour';
+  const isCrypto = normalizedTicker.startsWith('X:');
+  let url: string;
 
-  // Get the most recent bar (limit=1, sort=desc)
-  const toDate = new Date().toISOString().split('T')[0];
-  const fromDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]; // Last 7 days
-
-  const url = `${BASE_URL}/${normalizedTicker}/range/${multiplier}/${timespan}/${fromDate}/${toDate}?adjusted=true&sort=desc&limit=1&apiKey=${POLYGON_API_KEY}`;
+  if (isCrypto) {
+    const binanceSymbol = normalizedTicker.replace('X:', '');
+    const interval = timeframe === Timeframe.D1 ? '1d' : (timeframe === Timeframe.H4 ? '4h' : '1h');
+    url = `${activeBinanceBaseUrl}/api/v3/klines?symbol=${binanceSymbol}&interval=${interval}&limit=1`;
+  } else {
+    const multiplier = timeframe === Timeframe.D1 ? 1 : (timeframe === Timeframe.H4 ? 4 : 1);
+    const timespan = timeframe === Timeframe.D1 ? 'day' : 'hour';
+    const toDate = new Date().toISOString().split('T')[0];
+    const fromDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]; // Last 7 days
+    url = `${BASE_URL}/${normalizedTicker}/range/${multiplier}/${timespan}/${fromDate}/${toDate}?adjusted=true&sort=desc&limit=1&apiKey=${POLYGON_API_KEY}`;
+  }
 
   try {
     const data = await queuedFetch(url, priority);
-    if (data && data.results && data.results.length > 0) {
-      const latestBar = data.results[0];
-      return new Date(latestBar.t).toISOString();
+
+    if (isCrypto) {
+      if (Array.isArray(data) && data.length > 0) {
+        // Binance Klines: [0] is open time
+        return new Date(data[0][0]).toISOString();
+      }
+    } else {
+      if (data && data.results && data.results.length > 0) {
+        return new Date(data.results[0].t).toISOString();
+      }
     }
     return null;
   } catch (e) {
@@ -494,9 +507,15 @@ const performSync = async (ticker: string, timeframe: Timeframe, force: boolean 
   // 2. Identify starting point
   let fromDate: string;
 
+  // Calculate target days based on timeframe to reach ~1100 candles
+  let targetDays = 180; // Default
+  if (timeframe === Timeframe.H1) targetDays = 46;
+  else if (timeframe === Timeframe.H4) targetDays = 183;
+  else if (timeframe === Timeframe.D1) targetDays = 180; // Start with 180, backfill to 1100 later
+
   if (shouldForceSync) {
-    // Force mode: Get 6 months of data
-    fromDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    // Force mode: Use timeframe-specific target days
+    fromDate = new Date(Date.now() - targetDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     await db.bars.where('[ticker+timeframe+time]').between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"]).delete();
   } else {
     // Re-fetch lastBar after potential cleanup to ensure we have valid data
@@ -508,24 +527,38 @@ const performSync = async (ticker: string, timeframe: Timeframe, force: boolean 
 
     if (lastBar) {
       // Continue from last bar with 1 day overlap to ensure we fill any gaps
-      // This ensures we fetch missing data from last sync till current market data
       const d = new Date(lastBar.time);
       const now = Date.now();
       // CRITICAL FIX: Ensure date is not in the future
       if (d.getTime() > now) {
         console.warn(`⚠️  Last bar has future date for ${syncId}: ${lastBar.time}. Using current date instead.`);
         d.setTime(now);
-        // If we found a future date, force a fresh sync from 6 months ago
-        fromDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        fromDate = new Date(Date.now() - targetDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       } else {
         // Start 1 day before last bar to ensure overlap and fill any gaps
         d.setDate(d.getDate() - 1);
         fromDate = d.toISOString().split('T')[0];
       }
     } else {
-      // First sync: Get last 6 months of historical data
-      fromDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      // First sync: Use timeframe-specific target days
+      fromDate = new Date(Date.now() - targetDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     }
+  }
+
+  // 3. Trim old data to save memory if we have too much (Target ~1100 candles + buffer)
+  const maxDays = targetDays * 1.5; // Allow 50% buffer
+  const cutoffDate = new Date(Date.now() - maxDays * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    const deletedCount = await db.bars
+      .where('[ticker+timeframe+time]')
+      .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, cutoffDate])
+      .delete();
+    if (deletedCount > 0) {
+      // console.log(`🧹 Trimmed ${deletedCount} old bars for ${syncId} (older than ${Math.round(maxDays)} days)`);
+    }
+  } catch (e) {
+    console.warn(`⚠️ Failed to trim old data for ${syncId}:`, e);
   }
 
   // Always sync up to current date to ensure we have the most recent market data
@@ -569,7 +602,7 @@ const performSync = async (ticker: string, timeframe: Timeframe, force: boolean 
 
     try {
       console.log(`🔍 Fetching ${syncId} from ${isCrypto ? 'Binance' : 'Polygon'} starting ${currentStart}...`);
-      const data = await (isCrypto ? fetch(url).then(r => r.json()) : queuedFetch(url, priority));
+      const data = await queuedFetch(url, priority);
 
       // Reset error counter on success
       consecutiveErrors = 0;
@@ -652,12 +685,18 @@ const performSync = async (ticker: string, timeframe: Timeframe, force: boolean 
   // CRITICAL FIX: Use timeframe-appropriate staleness check
   // Account for market hours - crypto markets are 24/7, but data might lag
   const now = Date.now();
+  const today = new Date().getDay(); // 0 = Sunday, 6 = Saturday
+  const isWeekend = today === 0 || today === 6;
   const isCrypto = normalizedTicker.startsWith('X:');
+
   let stalenessThreshold = 86400000 * 2; // 2 days default
   if (timeframe === Timeframe.H1) {
-    stalenessThreshold = isCrypto ? 6 * 60 * 60 * 1000 : 2 * 60 * 60 * 1000; // 6h for crypto, 2h for stocks
+    // Weekend: Friday 4pm to Monday 9:30am is ~65 hours. Threshold 72h.
+    stalenessThreshold = isCrypto ? 6 * 60 * 60 * 1000 : (isWeekend ? 72 * 60 * 60 * 1000 : 2 * 60 * 60 * 1000);
   } else if (timeframe === Timeframe.H4) {
-    stalenessThreshold = isCrypto ? 12 * 60 * 60 * 1000 : 8 * 60 * 60 * 1000; // 12h for crypto, 8h for stocks
+    stalenessThreshold = isCrypto ? 12 * 60 * 60 * 1000 : (isWeekend ? 72 * 60 * 60 * 1000 : 8 * 60 * 60 * 1000);
+  } else if (timeframe === Timeframe.D1) {
+    stalenessThreshold = isWeekend ? 72 * 60 * 60 * 1000 : 86400000 * 2;
   }
 
   const isCurrent = checkLastBar && (now - new Date(checkLastBar.time).getTime() < stalenessThreshold);
@@ -672,7 +711,9 @@ const performSync = async (ticker: string, timeframe: Timeframe, force: boolean 
       console.warn(`⚠️  Sync finished for ${syncId} but data still appears old (last bar is ${lastBarAge}h old)`);
     } else {
       // Data is reasonably fresh, just not "current" - this is normal for markets that close or have delays
-      console.log(`✅ Sync completed for ${syncId} - data is ${lastBarAge}h old (acceptable)`);
+      if (priority === Priority.HIGH) {
+        console.log(`✅ Sync completed for ${syncId} - data is ${lastBarAge}h old (acceptable)`);
+      }
       await db.syncStatus.put({ id: syncId, lastSync: new Date().toISOString() });
     }
   } else {
@@ -771,7 +812,7 @@ const fetchLatestPrice = async (ticker: string, priority: Priority = Priority.LO
   const isCrypto = normalizedTicker.startsWith('X:');
   const endpoint = isCrypto
     ? `https://api.polygon.io/v2/snapshot/locale/global/markets/crypto/tickers/${normalizedTicker}`
-    : `https://api.polygon.io/v2/snapshot/locale/us/stocks/tickers/${normalizedTicker}`;
+    : `https://api.polygon.io/v3/snapshot?ticker.any_of=${normalizedTicker}`;
 
   try {
     if (isCrypto) {
@@ -791,19 +832,20 @@ const fetchLatestPrice = async (ticker: string, priority: Priority = Priority.LO
         };
       }
     } else {
-      const data = await queuedFetch(`${endpoint}?apiKey=${POLYGON_API_KEY}`, priority);
-      if (data && data.ticker) {
-        const t = data.ticker;
-        const price = t.lastTrade?.p || t.prevDay?.c || t.day?.c;
+      const data = await queuedFetch(`${endpoint}&apiKey=${POLYGON_API_KEY}`, priority);
+      if (data && data.results && data.results.length > 0) {
+        const t = data.results[0];
+        // V3 Snapshot returns 'session' or 'last_trade' data
+        const price = t.session?.c || t.last_trade?.p || t.prev_day?.c;
 
         if (price) {
           return {
             time: new Date().toISOString(),
             close: price,
-            high: Math.max(price, t.day?.h || price),
-            low: Math.min(price, t.day?.l || price),
-            open: t.day?.o || price,
-            volume: t.day?.v || 0
+            high: Math.max(price, t.session?.h || price),
+            low: Math.min(price, t.session?.l || price),
+            open: t.session?.o || price,
+            volume: t.session?.v || 0
           };
         }
       }
@@ -838,12 +880,24 @@ export const fetchTickerData = async (symbol: string, force: boolean = false, pr
     })
   ]);
 
+  // 1.5. Trigger background backfill for deeper history (D1 specifically)
+  // Don't await, let it run in the background
+  backfillTickerData(symbol, Timeframe.D1, p).catch(e => {
+    console.warn(`⚠️ Background backfill failed for ${symbol}`, e);
+  });
+
   // 2. Strict Price Unification Policy
-  // Check if all timeframes are within their expected range of "Now"
   const now = Date.now();
-  const d1Stale = d1Data.length === 0 || (now - new Date(d1Data[d1Data.length - 1].time).getTime() > 86400000 * 2);
-  const h4Stale = h4Data.length === 0 || (now - new Date(h4Data[h4Data.length - 1].time).getTime() > 14400000 * 2);
-  const h1Stale = h1Data.length === 0 || (now - new Date(h1Data[h1Data.length - 1].time).getTime() > 60 * 60 * 1000 * 2);
+  const today = new Date().getDay();
+  const isWeekend = today === 0 || today === 6;
+  const isCrypto = normalizeTicker(symbol).startsWith('X:');
+
+  // Multiplier for weekend
+  const weekMult = (isWeekend && !isCrypto) ? 3 : 1;
+
+  const d1Stale = d1Data.length === 0 || (now - new Date(d1Data[d1Data.length - 1].time).getTime() > 86400000 * 2 * weekMult);
+  const h4Stale = h4Data.length === 0 || (now - new Date(h4Data[h4Data.length - 1].time).getTime() > 14400000 * 2 * weekMult);
+  const h1Stale = h1Data.length === 0 || (now - new Date(h1Data[h1Data.length - 1].time).getTime() > 60 * 60 * 1000 * 2 * weekMult);
 
   const anyStale = d1Stale || h4Stale || h1Stale;
 
@@ -902,9 +956,123 @@ export const fetchTickerData = async (symbol: string, force: boolean = false, pr
 };
 
 /**
+ * Backfills older historical data in the background
+ */
+const pendingBackfills = new Set<string>();
+
+export const backfillTickerData = async (ticker: string, timeframe: Timeframe, priority: Priority = Priority.LOW): Promise<void> => {
+  if (timeframe !== Timeframe.D1) return;
+
+  const normalizedTicker = normalizeTicker(ticker);
+  const backfillId = `backfill:${normalizedTicker}:${timeframe}`;
+
+  if (pendingBackfills.has(backfillId)) return;
+
+  // Check if we already tried recently (within last 24h)
+  const lastCheck = await db.syncStatus.get(backfillId).catch(() => null);
+  if (lastCheck && (Date.now() - new Date(lastCheck.lastSync).getTime() < 24 * 60 * 60 * 1000)) {
+    return;
+  }
+
+  pendingBackfills.add(backfillId);
+
+  try {
+    const targetDays = 1100; // ~3 years
+    const targetDate = new Date(Date.now() - targetDays * 24 * 60 * 60 * 1000);
+    const toDateStr = targetDate.toISOString().split('T')[0];
+
+    // Find the EARLIEST bar we have in the database
+    const earliestBar = await db.bars
+      .where('[ticker+timeframe+time]')
+      .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
+      .first();
+
+    if (!earliestBar) return;
+
+    const earliestTime = new Date(earliestBar.time);
+    if (earliestTime <= targetDate) return;
+
+    // Only backfill if the gap is significant (> 200 bars)
+    const barsMissing = Math.round((earliestTime.getTime() - targetDate.getTime()) / (24 * 60 * 60 * 1000));
+    if (barsMissing < 200) return;
+
+    const fetchTo = new Date(earliestTime.getTime() - 1000).toISOString().split('T')[0];
+    const fetchFrom = toDateStr;
+
+    let currentStart = fetchFrom;
+    let hasMore = true;
+
+    while (hasMore) {
+      if (currentStart >= fetchTo) break;
+
+      const isCrypto = normalizedTicker.startsWith('X:');
+      let url: string;
+
+      if (isCrypto) {
+        const binanceSymbol = normalizedTicker.replace('X:', '');
+        const startTime = new Date(currentStart).getTime();
+        const endTime = new Date(fetchTo).getTime();
+        url = `${activeBinanceBaseUrl}/api/v3/klines?symbol=${binanceSymbol}&interval=1d&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+      } else {
+        url = `${BASE_URL}/${normalizedTicker}/range/1/day/${currentStart}/${fetchTo}?adjusted=true&sort=asc&limit=5000&apiKey=${POLYGON_API_KEY}`;
+      }
+
+      try {
+        const data = await queuedFetch(url, priority);
+        const results = isCrypto
+          ? (Array.isArray(data) ? data.map((k: any) => ({
+            t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5])
+          })) : [])
+          : (data?.results || []);
+
+        if (results.length > 0) {
+          const newBars: BarRecord[] = results.map((r: any) => ({
+            ticker: normalizedTicker,
+            timeframe,
+            time: new Date(r.t).toISOString(),
+            open: r.o, high: r.h, low: r.l, close: r.c, volume: r.v,
+          }));
+
+          await db.bars.bulkPut(newBars);
+          if (newBars.length > 10) {
+            console.log(`📥 Backfilled ${newBars.length} historical bars for ${ticker}:${timeframe}`);
+          }
+
+          const lastT = results[results.length - 1].t;
+          const lastDate = new Date(lastT).toISOString().split('T')[0];
+
+          if (lastDate >= fetchTo || results.length < (isCrypto ? 1000 : 4750)) {
+            hasMore = false;
+          } else {
+            const next = new Date(lastT);
+            next.setMinutes(next.getMinutes() + 1);
+            currentStart = next.toISOString().split('T')[0];
+          }
+        } else {
+          hasMore = false;
+        }
+      } catch (e) {
+        console.error(`❌ Backfill error for ${ticker}:${timeframe}:`, e);
+        hasMore = false;
+      }
+    }
+
+    // Mark as checked to prevent immediate retry
+    await db.syncStatus.put({ id: backfillId, lastSync: new Date().toISOString() }).catch(() => null);
+
+  } finally {
+    pendingBackfills.delete(backfillId);
+  }
+};
+
+/**
  * Market Scanner Logic - Consolidated by Ticker
  */
-export const scanMarket = async (customTickers?: string[]): Promise<ConsolidatedAlert[]> => {
+export const scanMarket = async (
+  customTickers?: string[],
+  sensitivity: number = 3,
+  timeframes: Timeframe[] = [Timeframe.H1, Timeframe.H4, Timeframe.D1]
+): Promise<ConsolidatedAlert[]> => {
   const tickerMap: Record<string, ConsolidatedAlert> = {};
   const tickers = customTickers || TICKERS;
 
@@ -914,29 +1082,45 @@ export const scanMarket = async (customTickers?: string[]): Promise<Consolidated
       const signals: ConsolidatedAlert['signals'] = [];
       let latestPrice = 0;
 
-      for (const tf of [Timeframe.D1, Timeframe.H4, Timeframe.H1]) {
+      for (const tf of timeframes) {
         const series = tickerData.data[tf as Timeframe];
         if (!series || series.length < 50) continue;
 
         latestPrice = series[series.length - 1].close;
 
-        const rsiDiv = scanForDivergences(series, IndicatorType.RSI);
+        const rsiDiv = scanForDivergences(series, IndicatorType.RSI, sensitivity);
+        const macdDiv = scanForDivergences(series, IndicatorType.MACD, sensitivity);
+
+        // Convergence logic: If both have signals on same TF, mark as confirmed
+        const isConfirmed = !!(rsiDiv && macdDiv && rsiDiv.signalType === macdDiv.signalType);
+
         if (rsiDiv) {
           signals.push({
             timeframe: tf as Timeframe,
-            signalType: rsiDiv.type,
+            signalType: rsiDiv.signalType,
             indicator: IndicatorType.RSI,
-            description: rsiDiv.description
+            description: rsiDiv.description,
+            isHidden: rsiDiv.isHidden,
+            strength: rsiDiv.strength,
+            isTriple: rsiDiv.isTriple,
+            isConfirmed,
+            isStale: rsiDiv.isStale,
+            isTrendAligned: rsiDiv.isTrendAligned
           });
         }
 
-        const macdDiv = scanForDivergences(series, IndicatorType.MACD);
         if (macdDiv) {
           signals.push({
             timeframe: tf as Timeframe,
-            signalType: macdDiv.type,
+            signalType: macdDiv.signalType,
             indicator: IndicatorType.MACD,
-            description: macdDiv.description
+            description: macdDiv.description,
+            isHidden: macdDiv.isHidden,
+            strength: macdDiv.strength,
+            isTriple: macdDiv.isTriple,
+            isConfirmed,
+            isStale: macdDiv.isStale,
+            isTrendAligned: macdDiv.isTrendAligned
           });
         }
       }

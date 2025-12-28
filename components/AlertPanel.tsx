@@ -20,6 +20,29 @@ interface AlertPanelProps {
   onMinDivergencesChange?: (minDivergences: number) => void;
   sortByRating?: boolean;
   onSortByRatingChange?: (sortByRating: boolean) => void;
+  // Backlog props
+  backlog?: Set<string>;
+  onToggleBacklog?: (ticker: string) => void;
+  hideBacklogged?: boolean;
+  onHideBackloggedChange?: (hide: boolean) => void;
+  // Advanced filters
+  showHidden?: 'REGULAR' | 'HIDDEN' | 'BOTH';
+  onShowHiddenChange?: (mode: 'REGULAR' | 'HIDDEN' | 'BOTH') => void;
+  minStrength?: number;
+  onMinStrengthChange?: (strength: number) => void;
+  onlyConfirmed?: boolean;
+  onOnlyConfirmedChange?: (only: boolean) => void;
+  onlyTriple?: boolean;
+  onOnlyTripleChange?: (only: boolean) => void;
+  hideStale?: boolean;
+  onHideStaleChange?: (hide: boolean) => void;
+  onlyTrendAligned?: boolean;
+  onOnlyTrendAlignedChange?: (only: boolean) => void;
+  scanSensitivity?: number;
+  onScanSensitivityChange?: (sensitivity: number) => void;
+  enabledTimeframes?: Timeframe[];
+  onEnabledTimeframesChange?: (timeframes: Timeframe[]) => void;
+  openTrades?: Set<string>;
 }
 
 type FilterType = 'ALL' | 'BULLISH' | 'BEARISH';
@@ -28,22 +51,43 @@ type FilterType = 'ALL' | 'BULLISH' | 'BEARISH';
 const AVAILABLE_TIMEFRAMES = Object.values(Timeframe);
 const MAX_TIMEFRAMES = AVAILABLE_TIMEFRAMES.length;
 
-const AlertPanel: React.FC<AlertPanelProps> = ({ 
-  alerts, 
-  onSelectAlert, 
-  loading, 
-  onScan, 
-  activeTicker, 
-  tickerRatings = {}, 
-  onRatingChange, 
-  tickerNotes = {}, 
+const AlertPanel: React.FC<AlertPanelProps> = ({
+  alerts,
+  onSelectAlert,
+  loading,
+  onScan,
+  activeTicker,
+  tickerRatings = {},
+  onRatingChange,
+  tickerNotes = {},
   onNotesChange,
   filter: propFilter = 'ALL',
   onFilterChange,
   minDivergences: propMinDivergences = 1,
   onMinDivergencesChange,
   sortByRating: propSortByRating = false,
-  onSortByRatingChange
+  onSortByRatingChange,
+  backlog = new Set(),
+  onToggleBacklog,
+  hideBacklogged = false,
+  onHideBackloggedChange,
+  showHidden = 'BOTH',
+  onShowHiddenChange,
+  minStrength = 0,
+  onMinStrengthChange,
+  onlyConfirmed = false,
+  onOnlyConfirmedChange,
+  onlyTriple = false,
+  onOnlyTripleChange,
+  hideStale = true,
+  onHideStaleChange,
+  onlyTrendAligned = false,
+  onOnlyTrendAlignedChange,
+  scanSensitivity = 3,
+  onScanSensitivityChange,
+  enabledTimeframes = AVAILABLE_TIMEFRAMES,
+  onEnabledTimeframesChange,
+  openTrades = new Set()
 }) => {
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<{ id: string, text: string } | null>(null);
@@ -121,27 +165,61 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
   const filteredAlerts = alerts.filter(alert => {
     // Filter by signal type (BULLISH/BEARISH/ALL)
     if (filter !== 'ALL') {
-      const hasBullish = alert.signals.some(s => s.signalType === SignalType.BULLISH_DIVERGENCE);
-      const hasBearish = alert.signals.some(s => s.signalType === SignalType.BEARISH_DIVERGENCE);
+      const hasBullish = alert.signals.some(s => s.signalType === SignalType.BULLISH_DIVERGENCE || s.signalType === SignalType.BULLISH_HIDDEN);
+      const hasBearish = alert.signals.some(s => s.signalType === SignalType.BEARISH_DIVERGENCE || s.signalType === SignalType.BEARISH_HIDDEN);
       const typeMatch = filter === 'BULLISH' ? hasBullish : hasBearish;
       if (!typeMatch) return false;
     }
-    
-    // Filter by minimum divergences required (number of unique timeframes)
-    // Count unique timeframes that have divergences
-    const uniqueTimeframes = new Set(alert.signals.map(s => s.timeframe));
-    return uniqueTimeframes.size >= minDivergences;
+
+    // Filter signals within the alert based on showHidden, enabledTimeframes, and quality settings
+    const activeSignals = alert.signals.filter(s => {
+      if (!enabledTimeframes.includes(s.timeframe)) return false;
+
+      // Divergence Type Filter
+      if (showHidden === 'REGULAR' && s.isHidden) return false;
+      if (showHidden === 'HIDDEN' && !s.isHidden) return false;
+
+      // Quality Filters
+      if (hideStale && s.isStale) return false;
+      if (onlyTrendAligned && !s.isTrendAligned) return false;
+
+      return true;
+    });
+
+    if (activeSignals.length === 0) return false;
+
+    // Advanced Filters applied only to active signals
+    if (onlyConfirmed && !activeSignals.some(s => s.isConfirmed)) return false;
+    if (onlyTriple && !activeSignals.some(s => s.isTriple)) return false;
+    if (minStrength > 0 && !activeSignals.some(s => (s.strength || 0) >= minStrength)) return false;
+
+    // List only unique timeframes for divergence filter based on active signals
+    const uniqueTimeframes = new Set(activeSignals.map(s => s.timeframe));
+    if (uniqueTimeframes.size < minDivergences) return false;
+
+    // Filter out backlogged if requested
+    if (hideBacklogged && backlog.has(alert.ticker)) return false;
+
+    return true;
   }).sort((a, b) => {
-    // Sort by rating if enabled (highest to lowest)
+    // 1. Backlog always goes to the bottom
+    const isBacklogA = backlog.has(a.ticker);
+    const isBacklogB = backlog.has(b.ticker);
+    if (isBacklogA !== isBacklogB) {
+      return isBacklogA ? 1 : -1;
+    }
+
+    // 2. Sort by rating if enabled
     if (sortByRating) {
       const ratingA = tickerRatings[a.ticker] || 0;
       const ratingB = tickerRatings[b.ticker] || 0;
-      // If ratings are equal, maintain original order
       if (ratingB !== ratingA) {
-        return ratingB - ratingA; // Descending order (highest first)
+        return ratingB - ratingA;
       }
     }
-    return 0; // Maintain original order if not sorting by rating
+
+    // 3. Default: Most recent signals first
+    return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
   });
 
   return (
@@ -171,11 +249,10 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
           </button>
           <button
             onClick={() => setShowFilterPanel(!showFilterPanel)}
-            className={`px-4 py-2 rounded-lg font-bold transition-colors ${
-              showFilterPanel 
-                ? 'bg-slate-700 text-white' 
-                : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-            }`}
+            className={`px-4 py-2 rounded-lg font-bold transition-colors ${showFilterPanel
+              ? 'bg-slate-700 text-white'
+              : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+              }`}
             title="Filter Settings"
           >
             Filter
@@ -186,7 +263,7 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
           <div className="mb-4 p-3 bg-slate-800 rounded-lg border border-slate-700">
             <h3 className="text-sm font-semibold text-white mb-3">Divergence Sync</h3>
             <div className="space-y-2 mb-4">
-              {Array.from({ length: MAX_TIMEFRAMES }, (_, i) => i + 1).map((num) => (
+              {Array.from({ length: enabledTimeframes.length }, (_, i) => i + 1).map((num) => (
                 <label key={num} className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="radio"
@@ -203,18 +280,151 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
               ))}
             </div>
             <div className="border-t border-slate-700 pt-3">
-              <h3 className="text-sm font-semibold text-white mb-3">Sort Options</h3>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={sortByRating}
-                  onChange={(e) => setSortByRating(e.target.checked)}
-                  className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 rounded focus:ring-indigo-500 focus:ring-2"
-                />
-                <span className="text-sm text-slate-300">
-                  Sort by rating (highest to lowest)
-                </span>
-              </label>
+              <h3 className="text-sm font-semibold text-white mb-3">View Options</h3>
+              <div className="space-y-3">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={propSortByRating}
+                    onChange={(e) => onSortByRatingChange && onSortByRatingChange(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 rounded focus:ring-indigo-500 focus:ring-2"
+                  />
+                  <span className="text-sm text-slate-300">
+                    Sort by rating (highest first)
+                  </span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={hideBacklogged}
+                    onChange={(e) => onHideBackloggedChange && onHideBackloggedChange(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 rounded focus:ring-indigo-500 focus:ring-2"
+                  />
+                  <span className="text-sm text-slate-300">
+                    Hide backlogged tickers
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div className="border-t border-slate-700 mt-3 pt-3">
+              <h3 className="text-sm font-semibold text-white mb-3">Scan Configuration</h3>
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[11px] text-slate-400">Target Timeframes</span>
+                    <span className="text-[10px] text-indigo-400 font-bold">{enabledTimeframes.length} Active</span>
+                  </div>
+                  <div className="flex gap-1 p-0.5 bg-slate-900 rounded-md">
+                    {AVAILABLE_TIMEFRAMES.map((tf) => (
+                      <button
+                        key={tf}
+                        onClick={() => {
+                          const isSelected = enabledTimeframes.includes(tf);
+                          const newTfs = isSelected
+                            ? enabledTimeframes.filter(t => t !== tf)
+                            : [...enabledTimeframes, tf].sort((a, b) => AVAILABLE_TIMEFRAMES.indexOf(a) - AVAILABLE_TIMEFRAMES.indexOf(b));
+                          if (newTfs.length > 0) onEnabledTimeframesChange?.(newTfs);
+                        }}
+                        className={`flex-1 py-1 px-1 text-[9px] font-bold rounded transition-all ${enabledTimeframes.includes(tf) ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                      >
+                        {tf}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t border-slate-700 mt-3 pt-3">
+              <h3 className="text-sm font-semibold text-white mb-3">Advanced Logic</h3>
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <span className="text-[11px] text-slate-400">Divergence Type</span>
+                  <div className="flex gap-1 p-0.5 bg-slate-900 rounded-md">
+                    {(['REGULAR', 'BOTH', 'HIDDEN'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        onClick={() => onShowHiddenChange?.(mode)}
+                        className={`flex-1 py-1 px-1 text-[9px] font-bold rounded transition-all ${showHidden === mode ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                      >
+                        {mode}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={onlyConfirmed}
+                    onChange={(e) => onOnlyConfirmedChange?.(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 rounded focus:ring-indigo-500 focus:ring-2"
+                  />
+                  <span className="text-sm text-slate-300">Only Confirmed (RSI+MACD)</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={onlyTriple}
+                    onChange={(e) => onOnlyTripleChange?.(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 rounded focus:ring-indigo-500 focus:ring-2"
+                  />
+                  <span className="text-sm text-slate-300">Only Triple Divergences</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={hideStale}
+                    onChange={(e) => onHideStaleChange?.(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 rounded focus:ring-indigo-500 focus:ring-2"
+                  />
+                  <span className="text-sm text-slate-300">Hide Stale Signals ({'>'}10 candles)</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={onlyTrendAligned}
+                    onChange={(e) => onOnlyTrendAlignedChange?.(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 rounded focus:ring-indigo-500 focus:ring-2"
+                  />
+                  <span className="text-sm text-slate-300">Trend-Aligned Only (Macro)</span>
+                </label>
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[11px] text-slate-400">
+                    <span>Min Strength</span>
+                    <span>{minStrength}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="10"
+                    value={minStrength}
+                    onChange={(e) => onMinStrengthChange?.(parseInt(e.target.value, 10))}
+                    className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[11px] text-slate-400">
+                    <span>Scan Sensitivity</span>
+                    <span>{scanSensitivity === 3 ? 'FAST' : 'SLOW'}</span>
+                  </div>
+                  <div className="flex gap-1 p-0.5 bg-slate-900 rounded-md">
+                    <button
+                      onClick={() => onScanSensitivityChange?.(3)}
+                      className={`flex-1 py-1 px-2 text-[10px] font-bold rounded ${scanSensitivity === 3 ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                    >
+                      FAST
+                    </button>
+                    <button
+                      onClick={() => onScanSensitivityChange?.(5)}
+                      className={`flex-1 py-1 px-2 text-[10px] font-bold rounded ${scanSensitivity === 5 ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                    >
+                      SLOW
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -243,31 +453,104 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
           <div
             key={alert.ticker}
             onClick={() => onSelectAlert(alert.ticker)}
-            className={`p-3 rounded-lg border cursor-pointer group transition-all ${alert.ticker === activeTicker
-              ? 'bg-slate-800/90 border-indigo-500 shadow-lg shadow-indigo-500/10'
-              : 'bg-slate-800 border-slate-700 hover:border-slate-600'
+            className={`p-3 rounded-lg border cursor-pointer group transition-all relative ${backlog.has(alert.ticker) ? 'opacity-40 grayscale-[0.5]' : ''
+              } ${alert.ticker === activeTicker
+                ? 'bg-slate-800/90 border-indigo-500 shadow-lg shadow-indigo-500/10'
+                : 'bg-slate-800 border-slate-700 hover:border-slate-600'
               }`}
           >
+            {onToggleBacklog && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleBacklog(alert.ticker);
+                }}
+                className={`absolute -top-2 -right-2 p-1.5 rounded-full border shadow-xl z-10 transition-all ${backlog.has(alert.ticker)
+                  ? 'bg-slate-700 border-slate-600 text-slate-300'
+                  : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-indigo-400 hover:border-indigo-500/50 opacity-0 group-hover:opacity-100'
+                  }`}
+                title={backlog.has(alert.ticker) ? "Remove from backlog" : "Move to backlog"}
+              >
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  {backlog.has(alert.ticker) ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 10l7 7m0 0l7-7m-7 7V3" />
+                  ) : (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                  )}
+                </svg>
+              </button>
+            )}
             <div className="flex justify-between items-start mb-2">
-              <span className="font-bold text-lg text-white">{alert.ticker}</span>
-              <div className="flex flex-wrap gap-1 justify-end max-w-[120px]">
-                {alert.signals.map((sig, idx) => (
-                  <span
-                    key={idx}
-                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${sig.signalType === SignalType.BULLISH_DIVERGENCE
-                      ? 'bg-green-500/10 text-green-400 border-green-500/20'
-                      : 'bg-red-500/10 text-red-400 border-red-500/20'
-                      }`}
-                  >
-                    {sig.timeframe}
+              <div className="flex flex-col">
+                <span className="font-bold text-lg text-white">{alert.ticker}</span>
+                {openTrades.has(alert.ticker) && (
+                  <span className="text-[9px] font-black bg-emerald-500 text-emerald-950 px-1.5 py-0.5 rounded-sm w-fit mt-1 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.3)]">
+                    TRADING
                   </span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1 justify-end max-w-[120px]">
+                {alert.signals.filter(s => {
+                  if (!enabledTimeframes.includes(s.timeframe)) return false;
+
+                  // Divergence Type
+                  if (showHidden === 'REGULAR' && s.isHidden) return false;
+                  if (showHidden === 'HIDDEN' && !s.isHidden) return false;
+
+                  // Quality Filters (Badge Logic)
+                  if (hideStale && s.isStale) return false;
+                  if (onlyTrendAligned && !s.isTrendAligned) return false;
+
+                  return true;
+                }).map((sig, idx) => (
+                  <div key={idx} className="flex flex-col items-end gap-1">
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${sig.signalType === SignalType.BULLISH_DIVERGENCE || sig.signalType === SignalType.BULLISH_HIDDEN
+                        ? 'bg-green-500/10 text-green-400 border-green-500/20'
+                        : 'bg-red-500/10 text-red-400 border-red-500/20'
+                        }`}
+                    >
+                      {sig.timeframe}
+                    </span>
+                    <div className="flex flex-wrap gap-1 justify-end">
+                      {sig.isHidden && <span className="text-[8px] bg-amber-500/20 text-amber-400 px-1 rounded font-bold">HIDDEN</span>}
+                      {sig.isTriple && <span className="text-[8px] bg-purple-500/20 text-purple-400 px-1 rounded font-bold">TRIPLE</span>}
+                      {sig.isConfirmed && <span className="text-[8px] bg-cyan-500/20 text-cyan-400 px-1 rounded font-bold">CONFIRMED</span>}
+                      {sig.isStale && <span className="text-[8px] bg-slate-500/20 text-slate-400 px-1 rounded font-bold">STALE</span>}
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
 
-            <p className="text-[11px] text-slate-400 mb-2 line-clamp-1 italic">
-              {alert.signals.length} signal{alert.signals.length > 1 ? 's' : ''} detected
-            </p>
+            <div className="space-y-1 mb-2">
+              <p className="text-[11px] text-slate-400 line-clamp-1 italic">
+                {(() => {
+                  const count = alert.signals.filter(s => {
+                    if (!enabledTimeframes.includes(s.timeframe)) return false;
+
+                    // Divergence Type
+                    if (showHidden === 'REGULAR' && s.isHidden) return false;
+                    if (showHidden === 'HIDDEN' && !s.isHidden) return false;
+
+                    // Quality Filters (Count Logic)
+                    if (hideStale && s.isStale) return false;
+                    if (onlyTrendAligned && !s.isTrendAligned) return false;
+
+                    return true;
+                  }).length;
+                  return `${count} signal${count !== 1 ? 's' : ''} detected`;
+                })()}
+              </p>
+              {alert.signals.some(s => s.strength !== undefined) && (
+                <div className="w-full h-1 bg-slate-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-indigo-500 transition-all duration-500"
+                    style={{ width: `${Math.max(...alert.signals.map(s => s.strength || 0))}%` }}
+                  />
+                </div>
+              )}
+            </div>
 
             <div className="flex justify-between items-center mt-2">
               <div className="flex items-center gap-2">
@@ -284,11 +567,10 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
                 {onNotesChange && (
                   <button
                     onClick={(e) => handleNotesClick(e, alert.ticker)}
-                    className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${
-                      tickerNotes[alert.ticker] && tickerNotes[alert.ticker].length > 0
-                        ? 'bg-yellow-500/20 hover:bg-yellow-500/40 text-yellow-300' 
-                        : 'bg-slate-600/20 hover:bg-slate-600/40 text-slate-400'
-                    }`}
+                    className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${tickerNotes[alert.ticker] && tickerNotes[alert.ticker].length > 0
+                      ? 'bg-yellow-500/20 hover:bg-yellow-500/40 text-yellow-300'
+                      : 'bg-slate-600/20 hover:bg-slate-600/40 text-slate-400'
+                      }`}
                     title={tickerNotes[alert.ticker] && tickerNotes[alert.ticker].length > 0 ? 'Add note' : 'Add note'}
                   >
                     <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">

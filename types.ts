@@ -22,8 +22,10 @@ export enum Timeframe {
 }
 
 export enum SignalType {
-  BULLISH_DIVERGENCE = 'Bullish Divergence',
-  BEARISH_DIVERGENCE = 'Bearish Divergence',
+  BULLISH_DIVERGENCE = 'Bullish',
+  BEARISH_DIVERGENCE = 'Bearish',
+  BULLISH_HIDDEN = 'Bullish Hidden',
+  BEARISH_HIDDEN = 'Bearish Hidden',
   NONE = 'None'
 }
 
@@ -39,6 +41,12 @@ export interface ConsolidatedAlert {
     signalType: SignalType;
     indicator: IndicatorType;
     description: string;
+    isHidden?: boolean;
+    strength?: number; // 0-100
+    isTriple?: boolean; // Multi-pivot
+    isConfirmed?: boolean; // RSI+MACD Convergence
+    isStale?: boolean; // More than 10 candles old
+    isTrendAligned?: boolean; // Aligned with macro trend
   }[];
   price: number;
   timestamp: string;
