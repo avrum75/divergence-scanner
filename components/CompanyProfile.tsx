@@ -155,6 +155,35 @@ const CompanyProfile: React.FC<CompanyProfileProps> = ({ ticker }) => {
       // Parse the response to extract JSON and markdown
       parseAnalysisResponse(analysis);
 
+      // Extract score from the parsed JSON
+      let extractedScore: string | null = null;
+      try {
+        let braceCount = 0;
+        let jsonStart = -1;
+        let jsonEnd = -1;
+        for (let i = 0; i < analysis.length; i++) {
+          if (analysis[i] === '{') {
+            if (jsonStart === -1) jsonStart = i;
+            braceCount++;
+          } else if (analysis[i] === '}') {
+            braceCount--;
+            if (braceCount === 0 && jsonStart !== -1) {
+              jsonEnd = i;
+              break;
+            }
+          }
+        }
+        if (jsonStart !== -1 && jsonEnd !== -1) {
+          const jsonStr = analysis.substring(jsonStart, jsonEnd + 1);
+          const jsonData = JSON.parse(jsonStr);
+          if (jsonData.verdict && jsonData.verdict.score) {
+            extractedScore = jsonData.verdict.score;
+          }
+        }
+      } catch (e) {
+        console.error('Error extracting score from analysis:', e);
+      }
+
       // Save to database via backend API
       const normalizedTicker = ticker.replace(/^X:/, '').toUpperCase();
       const API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5001';
@@ -172,10 +201,30 @@ const CompanyProfile: React.FC<CompanyProfileProps> = ({ ticker }) => {
       setGoodBusinessAnalysis(analysis);
       setAnalysisDate(analyzedAt);
       
+      // If score extraction failed, try to fetch it from the API
+      let finalScore = extractedScore;
+      if (!finalScore) {
+        try {
+          const scoreRes = await fetch(`${API_URL}/api/good_business/scores?tickers=${encodeURIComponent(normalizedTicker)}`);
+          if (scoreRes.ok) {
+            const scores = await scoreRes.json();
+            finalScore = scores[normalizedTicker] || null;
+          }
+        } catch (e) {
+          console.error('Failed to fetch score from API:', e);
+        }
+      }
+      
       // Refresh business scores in parent component
-      // Trigger a custom event that App.tsx can listen to
+      // Trigger a custom event that App.tsx can listen to, passing the score directly
+      // Pass both the normalized ticker (for DB) and original ticker (for matching alerts)
+      const originalTicker = ticker.toUpperCase().trim();
       window.dispatchEvent(new CustomEvent('businessAnalysisUpdated', { 
-        detail: { ticker: normalizedTicker } 
+        detail: { 
+          ticker: originalTicker, // Use original ticker format to match alerts
+          normalizedTicker: normalizedTicker, // Also pass normalized for DB operations
+          score: finalScore 
+        } 
       }));
     } catch (err: any) {
       console.error('Error analyzing Good Business:', err);

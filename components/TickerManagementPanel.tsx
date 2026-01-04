@@ -60,6 +60,32 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
         filterTickers();
     }, [marketType, tickers]); // Re-filter when marketType or tickers change
 
+    // Listen for business analysis updates to refresh the watchlist
+    useEffect(() => {
+        const handleBusinessAnalysisUpdate = async () => {
+            // Refresh the watchlist to get updated business scores
+            try {
+                const allWatchlist = await api.getWatchlist();
+                const filtered = allWatchlist
+                    .filter((w: any) => w.market_type === marketType)
+                    .map((w: any) => ({
+                        ticker: w.ticker,
+                        added_at: w.added_at,
+                        business_score: w.business_score
+                    }));
+                setFilteredTickers(filtered);
+            } catch (e) {
+                console.error("Failed to refresh watchlist after analysis update", e);
+            }
+        };
+
+        window.addEventListener('businessAnalysisUpdated', handleBusinessAnalysisUpdate as EventListener);
+
+        return () => {
+            window.removeEventListener('businessAnalysisUpdated', handleBusinessAnalysisUpdate as EventListener);
+        };
+    }, [marketType]); // Include marketType in dependency
+
     // Save market type to localStorage when it changes
     useEffect(() => {
         localStorage.setItem('watchlistMarketType', marketType);

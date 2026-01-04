@@ -4,7 +4,7 @@ import PortfolioPanel from './components/PortfolioPanel';
 import TickerManagementPanel from './components/TickerManagementPanel';
 import ChartGrid from './components/ChartGrid';
 import DocumentationModal from './components/DocumentationModal';
-import { scanMarket, fetchTickerData, getCachedTickerData, subscribeToSyncs } from './services/dataService';
+import { scanMarket, fetchTickerData, getCachedTickerData, subscribeToSyncs, fetchHistorical1DData } from './services/dataService';
 import { api } from './services/api';
 import { Alert, TickerData, Trade, Timeframe, ConsolidatedAlert } from './types';
 import { TICKERS as INITIAL_TICKERS } from './constants';
@@ -249,19 +249,51 @@ function App() {
 
     // Listen for business analysis updates
     const handleBusinessAnalysisUpdate = async (event: CustomEvent) => {
-      const { ticker } = event.detail;
-      // Refresh business scores from watchlist (which includes the updated score)
-      try {
-        const watchlist = await api.getWatchlist();
-        const updatedScores: Record<string, string> = {};
-        watchlist.forEach((w: any) => {
-          if (w.business_score) {
-            updatedScores[w.ticker] = w.business_score;
+      const { ticker, normalizedTicker, score } = event.detail;
+      
+      // If score is provided directly from the analysis, use it immediately
+      if (score) {
+        // Update for the original ticker format (to match alerts) and normalized format
+        const tickerUpper = (ticker || '').toUpperCase().trim();
+        const normalized = (normalizedTicker || tickerUpper.replace(/^X:/, '')).toUpperCase().trim();
+        
+        setBusinessScores(prev => {
+          const updated = { ...prev };
+          // Update both the original format and normalized format to ensure it matches
+          updated[tickerUpper] = score;
+          if (normalized !== tickerUpper) {
+            updated[normalized] = score;
           }
+          // Also handle X: prefix variations
+          if (tickerUpper.startsWith('X:')) {
+            updated[tickerUpper.replace(/^X:/, '')] = score;
+          } else {
+            updated[`X:${tickerUpper}`] = score;
+          }
+          return updated;
         });
-        setBusinessScores(prev => ({ ...prev, ...updatedScores }));
-      } catch (e) {
-        console.error("Failed to refresh business scores after update:", e);
+        console.log(`✅ Updated business score for ${tickerUpper}: ${score}`);
+      } else {
+        // Fallback: Refresh business scores from watchlist (which includes the updated score)
+        try {
+          const watchlist = await api.getWatchlist();
+          const updatedScores: Record<string, string> = {};
+          watchlist.forEach((w: any) => {
+            if (w.business_score) {
+              // Update for both formats
+              const tickerUpper = w.ticker.toUpperCase().trim();
+              updatedScores[tickerUpper] = w.business_score;
+              if (tickerUpper.startsWith('X:')) {
+                updatedScores[tickerUpper.replace(/^X:/, '')] = w.business_score;
+              } else {
+                updatedScores[`X:${tickerUpper}`] = w.business_score;
+              }
+            }
+          });
+          setBusinessScores(prev => ({ ...prev, ...updatedScores }));
+        } catch (e) {
+          console.error("Failed to refresh business scores after update:", e);
+        }
       }
     };
 
@@ -352,6 +384,18 @@ function App() {
         setSelectedTicker(current => {
           if (current === ticker) {
             setTickerData(freshData);
+            
+            // After initial load, gracefully fetch 12 months of historical 1D data
+            fetchHistorical1DData(ticker, 'HIGH').then(() => {
+              // Refresh data after historical load completes
+              if (current === ticker) {
+                getCachedTickerData(ticker).then(updatedData => {
+                  setTickerData(updatedData);
+                });
+              }
+            }).catch(e => {
+              console.error("Failed to load historical 1D data:", e);
+            });
           }
           return current;
         });

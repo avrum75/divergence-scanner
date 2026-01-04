@@ -422,7 +422,7 @@ const performSync = async (ticker: string, timeframe: Timeframe, force: boolean 
 
   // 2. Sync Logic
   // Define time range
-  let targetDays = 180;
+  let targetDays = 180; // Default: 6 months for initial load
   if (timeframe === Timeframe.H1) targetDays = 60; // Max ~2 months for H1 to speed up
 
   const now = Date.now();
@@ -566,6 +566,118 @@ export const fetchTickerData = async (ticker: string, force: boolean = false, pr
     console.error(e);
   }
   return getCachedTickerData(ticker);
+};
+
+/**
+ * Fetch 12 months of historical 1D data for a ticker (graceful background load)
+ * This extends the existing data without deleting old data
+ */
+export const fetchHistorical1DData = async (ticker: string, priorityString: 'HIGH' | 'LOW' = 'HIGH'): Promise<void> => {
+  const normalizedTicker = normalizeTicker(ticker);
+  const priority = priorityString === 'HIGH' ? Priority.HIGH : Priority.LOW;
+  
+  // Check if we already have 12 months of data
+  const existingBars = await api.getBars(normalizedTicker, Timeframe.D1);
+  if (existingBars.length > 0) {
+    const sortedBars = existingBars.sort((a: any, b: any) => a.time.localeCompare(b.time));
+    const oldestBar = sortedBars[0];
+    const oldestBarTime = new Date(oldestBar.time).getTime();
+    const now = Date.now();
+    const twelveMonthsAgo = now - (365 * 24 * 60 * 60 * 1000); // 12 months in milliseconds
+    
+    // If we already have data older than 12 months, skip
+    if (oldestBarTime <= twelveMonthsAgo) {
+      console.log(`✅ ${normalizedTicker} already has 12+ months of 1D data`);
+      return;
+    }
+  }
+
+  console.log(`📊 Loading 12 months of historical 1D data for ${normalizedTicker}...`);
+  
+  // Use performSync with extended range for 1D data
+  const now = Date.now();
+  const twelveMonthsAgo = now - (365 * 24 * 60 * 60 * 1000);
+  
+  // Align to day boundary
+  const startDate = new Date(twelveMonthsAgo);
+  startDate.setHours(0, 0, 0, 0);
+  
+  const allBars: OhlcvData[] = [];
+  let currentStart = startDate.getTime();
+  const loopEnd = now;
+  
+  const isCrypto = normalizedTicker.startsWith('X:');
+  let loopCount = 0;
+  const MAX_LOOPS = 50;
+  
+  while (currentStart < loopEnd && loopCount < MAX_LOOPS) {
+    loopCount++;
+    
+    let url: string;
+    
+    if (isCrypto) {
+      const binanceSymbol = normalizedTicker.replace('X:', '');
+      url = `${activeBinanceBaseUrl}/api/v3/klines?symbol=${binanceSymbol}&interval=1d&startTime=${currentStart}&endTime=${loopEnd}&limit=1000`;
+    } else {
+      const startParam = new Date(currentStart).toISOString().split('T')[0];
+      const endParam = new Date(loopEnd).toISOString().split('T')[0];
+      url = `${BASE_URL}/${normalizedTicker}/range/1/day/${startParam}/${endParam}?adjusted=true&sort=asc&limit=5000&apiKey=${POLYGON_API_KEY}`;
+    }
+    
+    try {
+      const data = await queuedFetch(url, priority);
+      
+      let newRawBars: any[] = [];
+      if (isCrypto) {
+        if (Array.isArray(data)) {
+          newRawBars = data.map((k: any) => ({
+            t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5])
+          }));
+        }
+      } else {
+        if (data && data.results) {
+          newRawBars = data.results;
+        }
+      }
+      
+      if (newRawBars.length > 0) {
+        const processedBars = newRawBars
+          .filter((r: any) => r.t <= now)
+          .map((r: any) => ({
+            ticker: normalizedTicker,
+            timeframe: Timeframe.D1,
+            time: new Date(r.t).toISOString(),
+            open: r.o, high: r.h, low: r.l, close: r.c, volume: r.v
+          }));
+        
+        allBars.push(...processedBars);
+        
+        // Advance currentStart
+        const lastBarTime = newRawBars[newRawBars.length - 1].t;
+        const step = 86400000; // 1 day in milliseconds
+        const nextStart = lastBarTime + step;
+        
+        if (nextStart <= currentStart) {
+          currentStart += step;
+        } else {
+          currentStart = nextStart;
+        }
+        
+        if (currentStart >= loopEnd) break;
+      } else {
+        break;
+      }
+    } catch (e) {
+      console.error(`Error fetching historical 1D data for ${normalizedTicker}:`, e);
+      break;
+    }
+  }
+  
+  // Save the historical data (will merge with existing data in DB)
+  if (allBars.length > 0) {
+    await api.createBars(allBars);
+    console.log(`✅ Loaded ${allBars.length} additional 1D bars for ${normalizedTicker}`);
+  }
 };
 
 const addIndicators = (bars: OhlcvData[]): IndicatorData[] => {
