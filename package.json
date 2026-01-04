@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "backend": "cd backend && source venv/bin/activate && uvicorn main:app --reload --port 8000",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -15,6 +16,7 @@
     "lightweight-charts": "^5.1.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
+    "react-markdown": "^10.1.0",
     "recharts": "^3.6.0"
   },
   "devDependencies": {

@@ -1,7 +1,6 @@
-import { Alert, TickerData, Trade, Timeframe, OhlcvData, IndicatorData, SignalType, IndicatorType, ConsolidatedAlert } from '../types';
+import { OhlcvData, Timeframe, TickerSearchResult, IndicatorData, ConsolidatedAlert, SignalType, IndicatorType } from '../types';
 import { calculateRSI, calculateMACD, calculateEMA, scanForDivergences } from '../utils/technicalAnalysis';
-import { TICKERS } from '../constants';
-import { db, BarRecord } from '../db';
+import { api } from './api';
 
 const POLYGON_API_KEY = (process.env as any).POLYGON_API_KEY || '';
 const BASE_URL = 'https://api.polygon.io/v2/aggs/ticker';
@@ -101,13 +100,9 @@ const queuedFetch = async (url: string, priority: Priority): Promise<any> => {
       // Handle client errors (403, 404) - don't retry these
       if (resp.status >= 400 && resp.status < 500) {
         const errorText = await resp.text().catch(() => 'Unknown error');
-        // CRITICAL FIX: Silently return null for 403/404 on snapshot endpoints (expected for some tickers)
-        // 403 = Not authorized (plan limitation), 404 = Not found (ticker doesn't exist)
         if (isSnapshotEndpoint && (resp.status === 403 || resp.status === 404)) {
-          // Silently return null - these are expected failures for crypto snapshots on free tier
           return null;
         }
-        // Log other client errors
         console.error(`API Error ${resp.status} for ${url.split('apiKey=')[0]}: ${errorText.substring(0, 100)}`);
         throw new Error(`API Error ${resp.status}: ${errorText.substring(0, 200)}`);
       }
@@ -156,8 +151,6 @@ const normalizeTicker = (ticker: string): string => {
 };
 
 // --- Ticker Search ---
-
-import { TickerSearchResult } from '../types';
 
 export type MarketType = 'STOCKS' | 'CRYPTO';
 
@@ -224,44 +217,21 @@ const searchBinanceTickers = async (query: string): Promise<TickerSearchResult[]
   try {
     console.log(`🔍 Searching Binance for: ${query}`);
     const symbols = await getBinanceSymbols();
-    console.log(`📊 Loaded ${symbols.length} Binance symbols`);
 
-    if (!symbols || symbols.length === 0) {
-      console.warn("⚠️  No Binance symbols loaded");
-      return [];
-    }
+    if (!symbols || symbols.length === 0) return [];
 
     const queryUpper = query.toUpperCase().trim();
 
-    // Filter symbols that match the query (symbol, baseAsset, or quoteAsset)
-    // Prioritize exact matches and base asset matches
+    // Filter symbols that match the query
     const matches = symbols
       .filter((s: any) => {
         const symbol = (s.symbol || '').toUpperCase();
         const base = (s.baseAsset || '').toUpperCase();
         const quote = (s.quoteAsset || '').toUpperCase();
 
-        // Match if query is in symbol, base asset, or quote asset
         return symbol.includes(queryUpper) ||
           base.includes(queryUpper) ||
           quote.includes(queryUpper);
-      })
-      .sort((a: any, b: any) => {
-        // Sort by relevance: exact base match first, then symbol starts with, then contains
-        const aBase = (a.baseAsset || '').toUpperCase();
-        const bBase = (b.baseAsset || '').toUpperCase();
-        const aSymbol = (a.symbol || '').toUpperCase();
-        const bSymbol = (b.symbol || '').toUpperCase();
-
-        // Exact base match first
-        if (aBase === queryUpper && bBase !== queryUpper) return -1;
-        if (bBase === queryUpper && aBase !== queryUpper) return 1;
-
-        // Symbol starts with query
-        if (aSymbol.startsWith(queryUpper) && !bSymbol.startsWith(queryUpper)) return -1;
-        if (bSymbol.startsWith(queryUpper) && !aSymbol.startsWith(queryUpper)) return 1;
-
-        return 0;
       })
       .slice(0, 10) // Limit to 10 results
       .map((s: any) => ({
@@ -271,7 +241,6 @@ const searchBinanceTickers = async (query: string): Promise<TickerSearchResult[]
         type: 'crypto'
       }));
 
-    console.log(`✅ Found ${matches.length} matches for "${query}"`);
     return matches;
   } catch (e) {
     console.error("❌ Binance ticker search failed", e);
@@ -285,19 +254,45 @@ const searchBinanceTickers = async (query: string): Promise<TickerSearchResult[]
 const searchPolygonTickers = async (query: string): Promise<TickerSearchResult[]> => {
   if (!query || query.length < 2) return [];
 
-  const url = `https://api.polygon.io/v3/reference/tickers?search=${encodeURIComponent(query)}&active=true&sort=ticker&order=asc&limit=10&apiKey=${POLYGON_API_KEY}`;
+  const upperQuery = query.toUpperCase().trim();
+
+  // Parallel fetch: 1. Search Results, 2. Exact Match Check
+  const searchUrl = `https://api.polygon.io/v3/reference/tickers?search=${encodeURIComponent(query)}&active=true&sort=ticker&order=asc&limit=20&apiKey=${POLYGON_API_KEY}`;
 
   try {
-    const data = await queuedFetch(url, Priority.HIGH);
-    if (data && data.results) {
-      return data.results.map((r: any) => ({
+    const [searchData, exactMatch] = await Promise.all([
+      queuedFetch(searchUrl, Priority.HIGH).catch(() => ({ results: [] })),
+      getTickerDetails(upperQuery).catch(() => null)
+    ]);
+
+    let results: TickerSearchResult[] = [];
+
+    // If we found an exact match, put it first
+    if (exactMatch) {
+      results.push(exactMatch);
+    }
+
+    if (searchData && searchData.results) {
+      const searchResults = searchData.results.map((r: any) => ({
         ticker: r.ticker,
         name: r.name,
         market: r.market,
         type: r.type
       }));
+
+      // Filter out duplicates (if exact match was also in search results)
+      const seen = new Set<string>();
+      if (exactMatch) seen.add(exactMatch.ticker);
+
+      for (const item of searchResults) {
+        if (!seen.has(item.ticker)) {
+          results.push(item);
+          seen.add(item.ticker);
+        }
+      }
     }
-    return [];
+
+    return results.slice(0, 10); // Return top 10
   } catch (e) {
     console.error("Polygon ticker search failed", e);
     return [];
@@ -324,7 +319,6 @@ export const getTickerDetails = async (ticker: string): Promise<TickerSearchResu
 
   try {
     const data = await queuedFetch(url, Priority.LOW);
-    // Polygon API returns single ticker data in data.results as an object
     if (data && data.results) {
       const r = data.results;
       return {
@@ -336,41 +330,25 @@ export const getTickerDetails = async (ticker: string): Promise<TickerSearchResu
     }
     return null;
   } catch (e) {
-    // Silently fail - company name is optional
     return null;
   }
 };
 
 // --- Core Sync Logic ---
 
-// In-memory map to deduplicate concurrent requests for the same syncId
 const pendingSyncs = new Map<string, Promise<OhlcvData[]>>();
 
-// Observer pattern to notify UI of sync status changes
 type SyncListener = (syncingTickers: Set<string>) => void;
 const syncListeners = new Set<SyncListener>();
 
-const notifySyncListeners = () => {
-  const tickers = new Set<string>();
-  pendingSyncs.forEach((_, key) => {
-    tickers.add(key.split(':')[0]);
-  });
-  syncListeners.forEach(listener => listener(tickers));
-};
-
 export const subscribeToSyncs = (listener: SyncListener) => {
   syncListeners.add(listener);
-  // Initial notification
   const tickers = new Set<string>();
   pendingSyncs.forEach((_, key) => tickers.add(key.split(':')[0]));
   listener(tickers);
   return () => { syncListeners.delete(listener); };
 };
 
-/**
- * Lightweight check: Fetch only the latest bar to see if there's new data
- * Returns the latest bar timestamp, or null if no data available
- */
 const checkForUpdates = async (ticker: string, timeframe: Timeframe, priority: Priority): Promise<string | null> => {
   const normalizedTicker = normalizeTicker(ticker);
   const isCrypto = normalizedTicker.startsWith('X:');
@@ -393,7 +371,6 @@ const checkForUpdates = async (ticker: string, timeframe: Timeframe, priority: P
 
     if (isCrypto) {
       if (Array.isArray(data) && data.length > 0) {
-        // Binance Klines: [0] is open time
         return new Date(data[0][0]).toISOString();
       }
     } else {
@@ -403,210 +380,77 @@ const checkForUpdates = async (ticker: string, timeframe: Timeframe, priority: P
     }
     return null;
   } catch (e) {
-    // If check fails, assume we need to sync (better safe than sorry)
-    console.warn(`⚠️  Update check failed for ${normalizedTicker}:${timeframe}, will sync anyway:`, e);
     return null;
   }
 };
 
-/**
- * Internal function: Actual sync logic
- */
 const performSync = async (ticker: string, timeframe: Timeframe, force: boolean = false, priority: Priority = Priority.LOW): Promise<OhlcvData[]> => {
   const normalizedTicker = normalizeTicker(ticker);
   const syncId = `${normalizedTicker}:${timeframe}`;
-
-  // Use a local variable to track if we need to force sync (can't modify parameter)
   let shouldForceSync = force;
 
-  // 1. Check if we actually need to sync (Throttling)
+  // 1. Check if we actually need to sync
   if (!shouldForceSync) {
-    let status = await db.syncStatus.get(syncId);
-    // Check the LATEST bar in the DB for this ticker/timeframe
-    const latestBar = await db.bars
-      .where('[ticker+timeframe+time]')
-      .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
-      .reverse()
-      .first();
+    const status = await api.getSyncStatus(syncId);
 
+    // Quick cache check
     const now = Date.now();
     let tfDuration = (timeframe === Timeframe.D1) ? 86400000 : (timeframe === Timeframe.H4 ? 14400000 : 3600000);
 
-    // 1. Throttling Check (Priority High)
-    // If we synced successfully within the last 5 minutes (or 1h for Daily), DO NOT sync again,
-    // even if the data looks old (could be holiday, weekend, or delisted).
     if (status) {
-      const lastSync = new Date(status.lastSync).getTime();
-      const throttleThreshold = (timeframe === Timeframe.D1) ? 3600000 : 300000; // D1: 1hr, others: 5m
+      const lastSync = new Date(status.last_sync).getTime();
+      const throttleThreshold = (timeframe === Timeframe.D1) ? 3600000 : 300000; // 1h or 5m throttle
 
       if (now - lastSync < throttleThreshold) {
-        // console.log(`⏸️  Sync Throttled for ${syncId}. Recently synced.`);
-        const cached = await db.bars
-          .where('[ticker+timeframe+time]')
-          .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
-          .toArray();
-        return cached.sort((a, b) => a.time.localeCompare(b.time));
+        // We synced recently. Return existing bars.
+        const cachedBars = await api.getBars(normalizedTicker, timeframe);
+        return addIndicators(cachedBars.sort((a: any, b: any) => a.time.localeCompare(b.time)));
       }
     }
 
-    // 2. Staleness / Force Check
-    // Now we know we haven't synced recently. Check if we need to.
-
-    // Staleness Guard: If data is older than 1.5 periods, it is "Stale"
+    // Check data freshness
+    const latestBars = await api.getBars(normalizedTicker, timeframe);
+    const sortedBars = latestBars.sort((a: any, b: any) => a.time.localeCompare(b.time));
+    const latestBar = sortedBars.length > 0 ? sortedBars[sortedBars.length - 1] : null;
     const lastBarTime = latestBar ? new Date(latestBar.time).getTime() : 0;
-    const isStale = !latestBar || (now - lastBarTime > tfDuration * 1.5);
 
-    // CRITICAL FIX: Validate that lastBarTime is not in the future
-    if (latestBar && lastBarTime > now) {
-      console.warn(`⚠️  Found future-dated bar for ${syncId}: ${latestBar.time}. Clearing corrupted data.`);
-      // Delete future-dated bars
-      await db.bars
-        .where('[ticker+timeframe+time]')
-        .between([normalizedTicker, timeframe, new Date(now).toISOString()], [normalizedTicker, timeframe, "\uffff"])
-        .delete();
-      // Force a fresh sync
-      shouldForceSync = true;
-    }
-
-    // CRITICAL FIX: Always sync if data is stale (missing recent data) to fill gaps from last sync to current
-    // This ensures we always fetch missing data from last sync till current market data
-    if (isStale) {
-      const staleAge = latestBar ? Math.round((now - lastBarTime) / (1000 * 60 * 60)) : 0;
-      console.log(`🔄 Data is stale for ${syncId} (${staleAge}h old). Syncing to fill gap from last sync to current.`);
-      // Continue to sync logic - don't return cached data
-    } else if (status && !isStale && latestBar) {
-      // Data appears fresh - do a lightweight check to see if there's actually new data
-      // Only do this check if we have existing data AND it's low priority (background scanner)
-      // For manual high priority syncs, we trust the cache more or force it explicitly
-      if (priority === Priority.HIGH) {
-        const cached = await db.bars
-          .where('[ticker+timeframe+time]')
-          .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
-          .toArray();
-        return cached.sort((a, b) => a.time.localeCompare(b.time));
-      }
-
-      const latestApiBarTime = await checkForUpdates(normalizedTicker, timeframe, priority);
-      const latestBarTime = new Date(latestBar.time).getTime();
-
-      if (latestApiBarTime) {
-        const apiBarTime = new Date(latestApiBarTime).getTime();
-        // Only sync if API has newer data than what we have (with 1 minute tolerance for timing differences)
-        const timeDiff = apiBarTime - latestBarTime;
-        if (timeDiff > 60000) { // More than 1 minute newer
-          const ageDiff = Math.round(timeDiff / (1000 * 60 * 60));
-          console.log(`🔄 New data available for ${syncId} (${ageDiff}h newer). Syncing updates.`);
-          // Continue to sync logic
-        } else {
-          // No new data available, return cached
-          console.log(`✅ No updates available for ${syncId}. Using cached data.`);
-          const cached = await db.bars
-            .where('[ticker+timeframe+time]')
-            .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
-            .toArray();
-          // Update sync status to reflect we checked (but don't change the actual sync time)
-          await db.syncStatus.put({ id: syncId, lastSync: status.lastSync });
-          return cached.sort((a, b) => a.time.localeCompare(b.time));
-        }
-      } else {
-        // Check failed - assume no updates and return cached (checkForUpdates already logged the warning)
-        console.log(`✅ Update check inconclusive for ${syncId}. Using cached data.`);
-        const cached = await db.bars
-          .where('[ticker+timeframe+time]')
-          .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
-          .toArray();
-        return cached.sort((a, b) => a.time.localeCompare(b.time));
-      }
-    } else if (status && !isStale && !latestBar) {
-      // No data in cache but status exists - should sync
-      console.log(`🔄 No cached data for ${syncId} but status exists. Syncing.`);
-      // Continue to sync logic
+    // If we have recent data, skip full sync
+    if (latestBar && (now - lastBarTime < tfDuration * 2)) {
+      return addIndicators(sortedBars);
     }
   }
 
+  // 2. Sync Logic
+  // Define time range
+  let targetDays = 180;
+  if (timeframe === Timeframe.H1) targetDays = 60; // Max ~2 months for H1 to speed up
 
-  // 2. Identify starting point
-  let fromDate: string;
+  const now = Date.now();
+  const startTime = now - targetDays * 24 * 60 * 60 * 1000;
 
-  // Calculate target days based on timeframe to reach ~1100 candles
-  let targetDays = 180; // Default
-  if (timeframe === Timeframe.H1) targetDays = 46;
-  else if (timeframe === Timeframe.H4) targetDays = 183;
-  else if (timeframe === Timeframe.D1) targetDays = 180; // Start with 180, backfill to 1100 later
+  // Align start time to day boundary to be clean
+  const startDate = new Date(startTime);
+  startDate.setHours(0, 0, 0, 0);
 
-  if (shouldForceSync) {
-    // Force mode: Use timeframe-specific target days
-    fromDate = new Date(Date.now() - targetDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    await db.bars.where('[ticker+timeframe+time]').between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"]).delete();
-  } else {
-    // Re-fetch lastBar after potential cleanup to ensure we have valid data
-    const lastBar = await db.bars
-      .where('[ticker+timeframe+time]')
-      .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
-      .reverse()
-      .first();
+  const allBars: OhlcvData[] = [];
+  let currentStart = startDate.getTime();
+  const loopEnd = now;
 
-    if (lastBar) {
-      // Continue from last bar with 1 day overlap to ensure we fill any gaps
-      const d = new Date(lastBar.time);
-      const now = Date.now();
-      // CRITICAL FIX: Ensure date is not in the future
-      if (d.getTime() > now) {
-        console.warn(`⚠️  Last bar has future date for ${syncId}: ${lastBar.time}. Using current date instead.`);
-        d.setTime(now);
-        fromDate = new Date(Date.now() - targetDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-      } else {
-        // Start 1 day before last bar to ensure overlap and fill any gaps
-        d.setDate(d.getDate() - 1);
-        fromDate = d.toISOString().split('T')[0];
-      }
-    } else {
-      // First sync: Use timeframe-specific target days
-      fromDate = new Date(Date.now() - targetDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    }
-  }
+  // Loop fetching
+  // Use a safety break to prevent infinite loops in case of logic errors
+  let loopCount = 0;
+  const MAX_LOOPS = 50;
 
-  // 3. Trim old data to save memory if we have too much (Target ~1100 candles + buffer)
-  const maxDays = targetDays * 1.5; // Allow 50% buffer
-  const cutoffDate = new Date(Date.now() - maxDays * 24 * 60 * 60 * 1000).toISOString();
+  while (currentStart < loopEnd && loopCount < MAX_LOOPS) {
+    loopCount++;
 
-  try {
-    const deletedCount = await db.bars
-      .where('[ticker+timeframe+time]')
-      .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, cutoffDate])
-      .delete();
-    if (deletedCount > 0) {
-      // console.log(`🧹 Trimmed ${deletedCount} old bars for ${syncId} (older than ${Math.round(maxDays)} days)`);
-    }
-  } catch (e) {
-    console.warn(`⚠️ Failed to trim old data for ${syncId}:`, e);
-  }
-
-  // Always sync up to current date to ensure we have the most recent market data
-  const toDate = new Date().toISOString().split('T')[0];
-
-  // CRITICAL FIX: Validate date range
-  if (fromDate > toDate) {
-    console.error(`❌ Invalid date range for ${syncId}: ${fromDate} > ${toDate}. Resetting.`);
-    fromDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  }
-  let multiplier = 1;
-  let timespan = 'day';
-  if (timeframe === Timeframe.H4) { multiplier = 4; timespan = 'hour'; }
-  else if (timeframe === Timeframe.H1) { multiplier = 1; timespan = 'hour'; }
-
-  console.log(`📊 Starting sync loop for ${syncId} from ${fromDate} to ${toDate}`);
-
-  let currentStart = fromDate;
-  let hasMore = true;
-  let consecutiveErrors = 0;
-  const maxConsecutiveErrors = 3;
-
-  while (hasMore) {
-    if (currentStart > toDate) break;
-
+    // Construct URL
     const isCrypto = normalizedTicker.startsWith('X:');
     let url: string;
+
+    // Formatting start/end for API
+    // Polygon accepts timestamps in milliseconds.
+    // We use the timestamp directly.
 
     if (isCrypto) {
       const binanceSymbol = normalizedTicker.replace('X:', '');
@@ -614,552 +458,235 @@ const performSync = async (ticker: string, timeframe: Timeframe, force: boolean 
       if (timeframe === Timeframe.H4) interval = '4h';
       else if (timeframe === Timeframe.H1) interval = '1h';
 
-      const startTime = new Date(currentStart).getTime();
-      const endTime = new Date(toDate).getTime() + 86399999;
-      url = `${activeBinanceBaseUrl}/api/v3/klines?symbol=${binanceSymbol}&interval=${interval}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+      // Binance API limit 1000
+      url = `${activeBinanceBaseUrl}/api/v3/klines?symbol=${binanceSymbol}&interval=${interval}&startTime=${currentStart}&endTime=${loopEnd}&limit=1000`;
     } else {
-      url = `${BASE_URL}/${normalizedTicker}/range/${multiplier}/${timespan}/${currentStart}/${toDate}?adjusted=true&sort=asc&limit=5000&apiKey=${POLYGON_API_KEY}`;
+      let multiplier = 1;
+      let timespan = 'day';
+      if (timeframe === Timeframe.H4) { multiplier = 4; timespan = 'hour'; }
+      else if (timeframe === Timeframe.H1) { multiplier = 1; timespan = 'hour'; }
+
+      // Polygon API limit 50000 (we use 5000)
+      // Note: Polygon range endpoint expects YYYY-MM-DD for 'day' timespan, 
+      // but supports timestamps for intraday.
+      // To be safe, we'll format based on timespan.
+
+      let startParam = currentStart.toString();
+      let endParam = loopEnd.toString();
+
+      if (timeframe === Timeframe.D1) {
+        startParam = new Date(currentStart).toISOString().split('T')[0];
+        endParam = new Date(loopEnd).toISOString().split('T')[0];
+      }
+
+      url = `${BASE_URL}/${normalizedTicker}/range/${multiplier}/${timespan}/${startParam}/${endParam}?adjusted=true&sort=asc&limit=5000&apiKey=${POLYGON_API_KEY}`;
     }
 
     try {
-      console.log(`🔍 Fetching ${syncId} from ${isCrypto ? 'Binance' : 'Polygon'} starting ${currentStart}...`);
       const data = await queuedFetch(url, priority);
 
-      // Reset error counter on success
-      consecutiveErrors = 0;
-
-      // Normalize Binance data
-      const results = isCrypto
-        ? (Array.isArray(data) ? data.map((k: any) => ({
-          t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5])
-        })) : [])
-        : (data?.results || []);
-
-      if (results.length > 0) {
-        console.log(`📥 Received ${results.length} bars for ${syncId}`);
-
-        // Filter out future-dated bars
-        const now = Date.now();
-        const validBars = results.filter((r: any) => r.t <= now);
-
-        if (validBars.length === 0) {
-          hasMore = false;
-          continue;
-        }
-
-        const newBars: BarRecord[] = validBars.map((r: any) => ({
-          ticker: normalizedTicker,
-          timeframe,
-          time: new Date(r.t).toISOString(),
-          open: r.o, high: r.h, low: r.l, close: r.c, volume: r.v,
-        }));
-
-        await db.bars.bulkPut(newBars);
-
-        const lastT = validBars[validBars.length - 1].t;
-        const lastDate = new Date(lastT).toISOString().split('T')[0];
-
-        if (lastDate >= toDate || results.length < (isCrypto ? 1000 : 4750)) {
-          hasMore = false;
-        } else {
-          const next = new Date(lastT);
-          next.setMinutes(next.getMinutes() + 1); // Advance by 1 minute
-          currentStart = next.toISOString().split('T')[0];
-        }
-      } else {
-        hasMore = false;
-      }
-    } catch (e: any) {
-      consecutiveErrors++;
-      console.error(`❌ Sync loop error for ${syncId} (${consecutiveErrors}/${maxConsecutiveErrors}):`, e.message || e);
-
-      // CRITICAL FIX: Stop after too many consecutive errors to prevent infinite loops
-      if (consecutiveErrors >= maxConsecutiveErrors) {
-        console.error(`❌ Too many consecutive errors for ${syncId}. Stopping sync.`);
-        hasMore = false;
-        break;
-      }
-
-      // For client errors (403, 404), don't retry - just stop
-      if (e.message && e.message.includes('API Error 4')) {
-        console.error(`❌ Client error for ${syncId}. Stopping sync.`);
-        hasMore = false;
-        break;
-      }
-
-      // For other errors, wait a bit and try to advance
-      await new Promise(r => setTimeout(r, 2000));
-      const nextStart = new Date(currentStart);
-      nextStart.setDate(nextStart.getDate() + 1);
-      currentStart = nextStart.toISOString().split('T')[0];
-      if (currentStart > toDate) hasMore = false;
-    }
-  }
-
-  // Only update sync status if we actually reached the current date range
-  const checkLastBar = await db.bars
-    .where('[ticker+timeframe+time]')
-    .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
-    .reverse()
-    .first();
-
-  // CRITICAL FIX: Use timeframe-appropriate staleness check
-  // Account for market hours - crypto markets are 24/7, but data might lag
-  const now = Date.now();
-  const today = new Date().getDay(); // 0 = Sunday, 6 = Saturday
-  const isWeekend = today === 0 || today === 6;
-  const isCrypto = normalizedTicker.startsWith('X:');
-
-  let stalenessThreshold = 86400000 * 2; // 2 days default
-  if (timeframe === Timeframe.H1) {
-    // Weekend: Friday 4pm to Monday 9:30am is ~65 hours. Threshold 72h.
-    stalenessThreshold = isCrypto ? 6 * 60 * 60 * 1000 : (isWeekend ? 72 * 60 * 60 * 1000 : 2 * 60 * 60 * 1000);
-  } else if (timeframe === Timeframe.H4) {
-    stalenessThreshold = isCrypto ? 12 * 60 * 60 * 1000 : (isWeekend ? 72 * 60 * 60 * 1000 : 8 * 60 * 60 * 1000);
-  } else if (timeframe === Timeframe.D1) {
-    stalenessThreshold = isWeekend ? 72 * 60 * 60 * 1000 : 86400000 * 2;
-  }
-
-  const isCurrent = checkLastBar && (now - new Date(checkLastBar.time).getTime() < stalenessThreshold);
-  if (isCurrent) {
-    await db.syncStatus.put({ id: syncId, lastSync: new Date().toISOString() });
-    console.log(`✅ Sync completed for ${syncId} - now current`);
-  } else if (checkLastBar) {
-    const lastBarAge = Math.round((now - new Date(checkLastBar.time).getTime()) / (1000 * 60 * 60));
-    // Only warn if data is significantly old (more than 24h for hourly, 48h for 4h, 3 days for daily)
-    const warningThreshold = timeframe === Timeframe.H1 ? 24 : (timeframe === Timeframe.H4 ? 48 : 72);
-    if (lastBarAge > warningThreshold) {
-      console.warn(`⚠️  Sync finished for ${syncId} but data still appears old (last bar is ${lastBarAge}h old)`);
-    } else {
-      // Data is reasonably fresh, just not "current" - this is normal for markets that close or have delays
-      if (priority === Priority.HIGH) {
-        console.log(`✅ Sync completed for ${syncId} - data is ${lastBarAge}h old (acceptable)`);
-      }
-      await db.syncStatus.put({ id: syncId, lastSync: new Date().toISOString() });
-    }
-  } else {
-    console.log(`⚠️  Sync finished for ${syncId} but no data was saved`);
-  }
-
-  const final = await db.bars
-    .where('[ticker+timeframe+time]')
-    .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
-    .toArray();
-
-  return final.sort((a, b) => a.time.localeCompare(b.time));
-};
-
-/**
- * Limit concurrent calls to sync ticker data
- */
-export const syncTickerData = async (ticker: string, timeframe: Timeframe, force: boolean = false, priority: Priority = Priority.LOW): Promise<OhlcvData[]> => {
-  const normalizedTicker = normalizeTicker(ticker);
-  const syncId = `${normalizedTicker}:${timeframe}`;
-
-  if (pendingSyncs.has(syncId)) {
-    console.log(`⚡️ Joining existing sync for ${syncId}`);
-    return pendingSyncs.get(syncId)!;
-  }
-
-  const promise = performSync(ticker, timeframe, force, priority)
-    .finally(() => {
-      pendingSyncs.delete(syncId);
-      notifySyncListeners();
-    });
-
-  pendingSyncs.set(syncId, promise);
-  notifySyncListeners();
-  return promise;
-};
-
-/**
- * Returns cached data immediately for optimistic UI
- */
-export const getCachedTickerData = async (symbol: string): Promise<TickerData> => {
-  const normalizedTicker = normalizeTicker(symbol);
-  const fetchCachedTF = async (tf: Timeframe) => {
-    const bars = await db.bars.where('[ticker+timeframe+time]').between([normalizedTicker, tf, ""], [normalizedTicker, tf, "\uffff"]).toArray();
-    return processIndicators(bars.sort((a, b) => a.time.localeCompare(b.time)));
-  };
-
-  const data = {
-    [Timeframe.D1]: await fetchCachedTF(Timeframe.D1),
-    [Timeframe.H4]: await fetchCachedTF(Timeframe.H4),
-    [Timeframe.H1]: await fetchCachedTF(Timeframe.H1),
-  };
-
-  return {
-    symbol,
-    data,
-    livePrice: data[Timeframe.H1].length > 0 ? data[Timeframe.H1][data[Timeframe.H1].length - 1].close : 0
-  };
-};
-
-/**
- * Technical Indicator Logic
- */
-const processIndicators = (ohlcv: OhlcvData[]): IndicatorData[] => {
-  if (ohlcv.length === 0) return [];
-
-  // O(N) uniqueness check: Assumes data is already sorted by time
-  const uniqueBars: OhlcvData[] = [];
-  if (ohlcv.length > 0) {
-    uniqueBars.push(ohlcv[0]);
-    for (let i = 1; i < ohlcv.length; i++) {
-      if (ohlcv[i].time !== ohlcv[i - 1].time) {
-        uniqueBars.push(ohlcv[i]);
-      }
-    }
-  }
-
-  const prices = uniqueBars.map(d => d.close);
-  const ema20 = calculateEMA(prices, 20);
-  const rsi = calculateRSI(prices, 14);
-  const { macdLine, signalLine, histogram } = calculateMACD(prices);
-
-  return uniqueBars.map((d, i) => ({
-    ...d,
-    ema: ema20[i],
-    rsi: rsi[i],
-    macd: macdLine[i],
-    macdSignal: signalLine[i],
-    macdHist: histogram[i]
-  }));
-};
-
-/**
- * Snapshot (Live Price) Logic
- */
-const fetchLatestPrice = async (ticker: string, priority: Priority = Priority.LOW): Promise<Partial<OhlcvData> | null> => {
-  const normalizedTicker = normalizeTicker(ticker);
-  const isCrypto = normalizedTicker.startsWith('X:');
-  const endpoint = isCrypto
-    ? `https://api.polygon.io/v2/snapshot/locale/global/markets/crypto/tickers/${normalizedTicker}`
-    : `https://api.polygon.io/v3/snapshot?ticker.any_of=${normalizedTicker}`;
-
-  try {
-    if (isCrypto) {
-      const binanceSymbol = normalizedTicker.replace('X:', '');
-      const url = `${activeBinanceBaseUrl}/api/v3/ticker/24hr?symbol=${binanceSymbol}`;
-      const data = await fetch(url).then(r => r.json());
-
-      if (data && data.lastPrice) {
-        const price = parseFloat(data.lastPrice);
-        return {
-          time: new Date().toISOString(),
-          close: price,
-          high: parseFloat(data.highPrice),
-          low: parseFloat(data.lowPrice),
-          open: parseFloat(data.openPrice),
-          volume: parseFloat(data.volume)
-        };
-      }
-    } else {
-      const data = await queuedFetch(`${endpoint}&apiKey=${POLYGON_API_KEY}`, priority);
-      if (data && data.results && data.results.length > 0) {
-        const t = data.results[0];
-        // V3 Snapshot returns 'session' or 'last_trade' data
-        const price = t.session?.c || t.last_trade?.p || t.prev_day?.c;
-
-        if (price) {
-          return {
-            time: new Date().toISOString(),
-            close: price,
-            high: Math.max(price, t.session?.h || price),
-            low: Math.min(price, t.session?.l || price),
-            open: t.session?.o || price,
-            volume: t.session?.v || 0
-          };
-        }
-      }
-    }
-  } catch (e: any) {
-    // CRITICAL FIX: Silently handle 403/404 errors for snapshot endpoints
-    // 403 = Not authorized (plan limitation - some crypto tickers require higher plan)
-    // 404 = Not found (ticker doesn't exist or doesn't have snapshot data)
-    if (e.message && (e.message.includes('API Error 403') || e.message.includes('API Error 404'))) {
-      // Silently handle these - they're expected for some tickers
-      return null;
-    }
-    console.warn(`Snapshot fetch failed for ${ticker}:`, e.message || e);
-  }
-  return null;
-};
-
-/**
- * Public Data Interface
- */
-export const fetchTickerData = async (symbol: string, force: boolean = false, priorityLevel: 'HIGH' | 'LOW' = 'LOW'): Promise<TickerData> => {
-  const p = priorityLevel === 'HIGH' ? Priority.HIGH : Priority.LOW;
-
-  // OPTIMIZED: Parallel execution for paid accounts
-  const [d1Data, h4Data, h1Data, liveSnapshot] = await Promise.all([
-    syncTickerData(symbol, Timeframe.D1, force, p),
-    syncTickerData(symbol, Timeframe.H4, force, p),
-    syncTickerData(symbol, Timeframe.H1, force, p),
-    fetchLatestPrice(symbol, p).catch(e => {
-      console.warn(`Snapshot fetch failed for ${symbol}, continuing with cached data:`, e.message);
-      return null;
-    })
-  ]);
-
-  // 1.5. Trigger background backfill for deeper history (D1 specifically)
-  // Don't await, let it run in the background
-  backfillTickerData(symbol, Timeframe.D1, p).catch(e => {
-    console.warn(`⚠️ Background backfill failed for ${symbol}`, e);
-  });
-
-  // 2. Strict Price Unification Policy
-  const now = Date.now();
-  const today = new Date().getDay();
-  const isWeekend = today === 0 || today === 6;
-  const isCrypto = normalizeTicker(symbol).startsWith('X:');
-
-  // Multiplier for weekend
-  const weekMult = (isWeekend && !isCrypto) ? 3 : 1;
-
-  const d1Stale = d1Data.length === 0 || (now - new Date(d1Data[d1Data.length - 1].time).getTime() > 86400000 * 2 * weekMult);
-  const h4Stale = h4Data.length === 0 || (now - new Date(h4Data[h4Data.length - 1].time).getTime() > 14400000 * 2 * weekMult);
-  const h1Stale = h1Data.length === 0 || (now - new Date(h1Data[h1Data.length - 1].time).getTime() > 60 * 60 * 1000 * 2 * weekMult);
-
-  const anyStale = d1Stale || h4Stale || h1Stale;
-
-  const patchSeries = (series: OhlcvData[], tf: Timeframe): OhlcvData[] => {
-    // If any timeframe is stale OR we have no snapshot, we DO NOT patch.
-    // This maintains perfect 1:1 parity between the header price and all chart labels.
-    if (!liveSnapshot || series.length === 0 || anyStale) return series;
-
-    const lastBar = series[series.length - 1];
-    const snapshotTime = new Date(liveSnapshot.time!).getTime();
-    const lastBarTime = new Date(lastBar.time).getTime();
-
-    let tfDuration = 24 * 60 * 60 * 1000;
-    if (tf === Timeframe.H4) tfDuration = 4 * 60 * 60 * 1000;
-    else if (tf === Timeframe.H1) tfDuration = 1 * 60 * 60 * 1000;
-
-    const timeSinceLast = snapshotTime - lastBarTime;
-
-    if (timeSinceLast < tfDuration * 1.5) {
-      const updated = [...series];
-      const last = updated.length - 1;
-      updated[last] = {
-        ...updated[last],
-        close: liveSnapshot.close!,
-        high: Math.max(updated[last].high, liveSnapshot.high || liveSnapshot.close!),
-        low: Math.min(updated[last].low, liveSnapshot.low || liveSnapshot.close!),
-      };
-      return updated;
-    } else if (timeSinceLast < tfDuration * 2.5) {
-      return [...series, {
-        time: new Date(lastBarTime + tfDuration).toISOString(),
-        open: liveSnapshot.open || liveSnapshot.close!,
-        high: liveSnapshot.high || liveSnapshot.close!,
-        low: liveSnapshot.low || liveSnapshot.close!,
-        close: liveSnapshot.close!,
-        volume: liveSnapshot.volume || 0
-      }];
-    }
-    return series;
-  };
-
-  return {
-    symbol,
-    livePrice: liveSnapshot?.close || (h1Data.length > 0 ? h1Data[h1Data.length - 1].close : 0),
-    syncStatus: {
-      [Timeframe.D1]: !d1Stale,
-      [Timeframe.H4]: !h4Stale,
-      [Timeframe.H1]: !h1Stale,
-    },
-    data: {
-      [Timeframe.D1]: processIndicators(patchSeries(d1Data, Timeframe.D1)),
-      [Timeframe.H4]: processIndicators(patchSeries(h4Data, Timeframe.H4)),
-      [Timeframe.H1]: processIndicators(patchSeries(h1Data, Timeframe.H1)),
-    }
-  };
-};
-
-/**
- * Backfills older historical data in the background
- */
-const pendingBackfills = new Set<string>();
-
-export const backfillTickerData = async (ticker: string, timeframe: Timeframe, priority: Priority = Priority.LOW): Promise<void> => {
-  if (timeframe !== Timeframe.D1) return;
-
-  const normalizedTicker = normalizeTicker(ticker);
-  const backfillId = `backfill:${normalizedTicker}:${timeframe}`;
-
-  if (pendingBackfills.has(backfillId)) return;
-
-  // Check if we already tried recently (within last 24h)
-  const lastCheck = await db.syncStatus.get(backfillId).catch(() => null);
-  if (lastCheck && (Date.now() - new Date(lastCheck.lastSync).getTime() < 24 * 60 * 60 * 1000)) {
-    return;
-  }
-
-  pendingBackfills.add(backfillId);
-
-  try {
-    const targetDays = 1100; // ~3 years
-    const targetDate = new Date(Date.now() - targetDays * 24 * 60 * 60 * 1000);
-    const toDateStr = targetDate.toISOString().split('T')[0];
-
-    // Find the EARLIEST bar we have in the database
-    const earliestBar = await db.bars
-      .where('[ticker+timeframe+time]')
-      .between([normalizedTicker, timeframe, ""], [normalizedTicker, timeframe, "\uffff"])
-      .first();
-
-    if (!earliestBar) return;
-
-    const earliestTime = new Date(earliestBar.time);
-    if (earliestTime <= targetDate) return;
-
-    // Only backfill if the gap is significant (> 200 bars)
-    const barsMissing = Math.round((earliestTime.getTime() - targetDate.getTime()) / (24 * 60 * 60 * 1000));
-    if (barsMissing < 200) return;
-
-    const fetchTo = new Date(earliestTime.getTime() - 1000).toISOString().split('T')[0];
-    const fetchFrom = toDateStr;
-
-    let currentStart = fetchFrom;
-    let hasMore = true;
-
-    while (hasMore) {
-      if (currentStart >= fetchTo) break;
-
-      const isCrypto = normalizedTicker.startsWith('X:');
-      let url: string;
-
+      // Normalize results
+      let newRawBars: any[] = [];
       if (isCrypto) {
-        const binanceSymbol = normalizedTicker.replace('X:', '');
-        const startTime = new Date(currentStart).getTime();
-        const endTime = new Date(fetchTo).getTime();
-        url = `${activeBinanceBaseUrl}/api/v3/klines?symbol=${binanceSymbol}&interval=1d&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+        if (Array.isArray(data)) {
+          newRawBars = data.map((k: any) => ({
+            t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5])
+          }));
+        }
       } else {
-        url = `${BASE_URL}/${normalizedTicker}/range/1/day/${currentStart}/${fetchTo}?adjusted=true&sort=asc&limit=5000&apiKey=${POLYGON_API_KEY}`;
+        if (data && data.results) {
+          newRawBars = data.results;
+        }
       }
 
-      try {
-        const data = await queuedFetch(url, priority);
-        const results = isCrypto
-          ? (Array.isArray(data) ? data.map((k: any) => ({
-            t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5])
-          })) : [])
-          : (data?.results || []);
-
-        if (results.length > 0) {
-          const newBars: BarRecord[] = results.map((r: any) => ({
+      if (newRawBars.length > 0) {
+        const processedBars = newRawBars
+          .filter((r: any) => r.t <= now)
+          .map((r: any) => ({
             ticker: normalizedTicker,
             timeframe,
             time: new Date(r.t).toISOString(),
-            open: r.o, high: r.h, low: r.l, close: r.c, volume: r.v,
+            open: r.o, high: r.h, low: r.l, close: r.c, volume: r.v
           }));
 
-          await db.bars.bulkPut(newBars);
-          if (newBars.length > 10) {
-            console.log(`📥 Backfilled ${newBars.length} historical bars for ${ticker}:${timeframe}`);
-          }
+        allBars.push(...processedBars);
 
-          const lastT = results[results.length - 1].t;
-          const lastDate = new Date(lastT).toISOString().split('T')[0];
+        // Advance currentStart
+        const lastBarTime = newRawBars[newRawBars.length - 1].t;
 
-          if (lastDate >= fetchTo || results.length < (isCrypto ? 1000 : 4750)) {
-            hasMore = false;
-          } else {
-            const next = new Date(lastT);
-            next.setMinutes(next.getMinutes() + 1);
-            currentStart = next.toISOString().split('T')[0];
-          }
+        // Advance by 1 unit to avoid duplicates/stuck loop
+        // H4 = 14400000, H1 = 3600000, D1 = 86400000
+        const step = timeframe === Timeframe.D1 ? 86400000 : (timeframe === Timeframe.H4 ? 14400000 : 3600000);
+
+        // Ensure we strictly move forward
+        const nextStart = lastBarTime + step;
+        if (nextStart <= currentStart) {
+          currentStart += step; // Fallback if data time is weird
         } else {
-          hasMore = false;
+          currentStart = nextStart;
         }
-      } catch (e) {
-        console.error(`❌ Backfill error for ${ticker}:${timeframe}:`, e);
-        hasMore = false;
+
+        // Break if we are up to date (close enough to loopEnd)
+        if (currentStart >= loopEnd) break;
+
+      } else {
+        // No more data found in this range
+        break;
       }
+
+    } catch (e) {
+      console.error(`Sync error for ${syncId}:`, e);
+      break;
     }
-
-    // Mark as checked to prevent immediate retry
-    await db.syncStatus.put({ id: backfillId, lastSync: new Date().toISOString() }).catch(() => null);
-
-  } finally {
-    pendingBackfills.delete(backfillId);
   }
+
+  // 3. Save and Update Status
+  if (allBars.length > 0) {
+    await api.createBars(allBars);
+  }
+
+  // ALWAYS update sync status if we ran the loop, so we don't retry endlessly immediately
+  await api.updateSyncStatus(syncId, new Date().toISOString());
+
+  // Return fresh data from DB (re-fetch to ensure order and consistency)
+  const finalBars = await api.getBars(normalizedTicker, timeframe);
+  return addIndicators(finalBars.sort((a: any, b: any) => a.time.localeCompare(b.time)));
 };
 
-/**
- * Market Scanner Logic - Consolidated by Ticker
- */
-export const scanMarket = async (
-  customTickers?: string[],
-  sensitivity: number = 3,
-  timeframes: Timeframe[] = [Timeframe.H1, Timeframe.H4, Timeframe.D1]
-): Promise<ConsolidatedAlert[]> => {
-  const tickerMap: Record<string, ConsolidatedAlert> = {};
-  const tickers = customTickers || TICKERS;
 
-  for (const ticker of tickers) {
+export const fetchTickerData = async (ticker: string, force: boolean = false, priorityString: 'HIGH' | 'LOW' = 'LOW'): Promise<any> => {
+  // ... Implement wrapper calling performSync ...
+  const priority = priorityString === 'HIGH' ? Priority.HIGH : Priority.LOW;
+  // For now simple sync
+  try {
+    await performSync(ticker, Timeframe.D1, force, priority);
+    await performSync(ticker, Timeframe.H4, force, priority);
+    await performSync(ticker, Timeframe.H1, force, priority);
+  } catch (e) {
+    console.error(e);
+  }
+  return getCachedTickerData(ticker);
+};
+
+const addIndicators = (bars: OhlcvData[]): IndicatorData[] => {
+  if (!bars || bars.length === 0) return [];
+
+  const closes = bars.map(b => b.close);
+
+  // Calculate Indicators
+  const rsi = calculateRSI(closes);
+  const { macdLine, signalLine, histogram } = calculateMACD(closes);
+  const ema = calculateEMA(closes, 20);
+
+  // Merge back
+  return bars.map((bar, i) => ({
+    ...bar,
+    rsi: rsi[i],
+    macd: macdLine[i],
+    macdSignal: signalLine[i],
+    macdHist: histogram[i],
+    ema: ema[i]
+  }));
+};
+
+export const scanMarket = async (watchlist: string[]): Promise<ConsolidatedAlert[]> => {
+  const alertsMap = new Map<string, ConsolidatedAlert>();
+
+  for (const ticker of watchlist) {
     try {
-      const tickerData = await getCachedTickerData(ticker);
-      const signals: ConsolidatedAlert['signals'] = [];
-      let latestPrice = 0;
+      const cachedData = await getCachedTickerData(ticker);
+      if (!cachedData) continue;
 
-      for (const tf of timeframes) {
-        const series = tickerData.data[tf as Timeframe];
-        if (!series || series.length < 50) continue;
+      // Initialize alert object for this ticker
+      if (!alertsMap.has(ticker)) {
+        const lastBar = cachedData.data[Timeframe.D1]?.slice(-1)[0] ||
+          cachedData.data[Timeframe.H4]?.slice(-1)[0] ||
+          cachedData.data[Timeframe.H1]?.slice(-1)[0];
 
-        latestPrice = series[series.length - 1].close;
+        if (lastBar) {
+          alertsMap.set(ticker, {
+            ticker,
+            signals: [],
+            price: lastBar.close,
+            timestamp: lastBar.time,
+            discoveredAt: new Date().toISOString()
+          });
+        }
+      }
 
-        const rsiDiv = scanForDivergences(series, IndicatorType.RSI, sensitivity);
-        const macdDiv = scanForDivergences(series, IndicatorType.MACD, sensitivity);
+      const alertObj = alertsMap.get(ticker);
+      if (!alertObj) continue;
 
-        // Convergence logic: If both have signals on same TF, mark as confirmed
-        const isConfirmed = !!(rsiDiv && macdDiv && rsiDiv.signalType === macdDiv.signalType);
+      const checkTimeframe = (tf: Timeframe) => {
+        const data = cachedData.data[tf];
+        if (!data || data.length < 50) return;
 
+        // RSI
+        const rsiDiv = scanForDivergences(data, IndicatorType.RSI);
         if (rsiDiv) {
-          signals.push({
-            timeframe: tf as Timeframe,
+          alertObj.signals.push({
+            timeframe: tf,
             signalType: rsiDiv.signalType,
             indicator: IndicatorType.RSI,
             description: rsiDiv.description,
             isHidden: rsiDiv.isHidden,
             strength: rsiDiv.strength,
             isTriple: rsiDiv.isTriple,
-            isConfirmed,
+            isConfirmed: true, // Placeholder
             isStale: rsiDiv.isStale,
             isTrendAligned: rsiDiv.isTrendAligned
           });
         }
 
+        // MACD
+        const macdDiv = scanForDivergences(data, IndicatorType.MACD);
         if (macdDiv) {
-          signals.push({
-            timeframe: tf as Timeframe,
+          alertObj.signals.push({
+            timeframe: tf,
             signalType: macdDiv.signalType,
             indicator: IndicatorType.MACD,
             description: macdDiv.description,
             isHidden: macdDiv.isHidden,
             strength: macdDiv.strength,
             isTriple: macdDiv.isTriple,
-            isConfirmed,
+            isConfirmed: true,
             isStale: macdDiv.isStale,
             isTrendAligned: macdDiv.isTrendAligned
           });
         }
+      };
+
+      checkTimeframe(Timeframe.D1);
+      checkTimeframe(Timeframe.H4);
+      checkTimeframe(Timeframe.H1);
+
+      // Remove if no signals found
+      if (alertObj.signals.length === 0) {
+        alertsMap.delete(ticker);
       }
 
-      if (signals.length > 0) {
-        tickerMap[ticker] = {
-          ticker,
-          signals,
-          price: latestPrice,
-          timestamp: new Date().toISOString()
-        };
-      }
     } catch (e) {
-      console.error(`Scan error for ${ticker}:`, e);
+      console.error(`Failed to scan ${ticker}`, e);
     }
   }
 
-  return Object.values(tickerMap).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  return Array.from(alertsMap.values());
+};
+
+export const getCachedTickerData = async (ticker: string): Promise<any> => {
+  // Fetch from API
+  const d1 = await api.getBars(ticker, Timeframe.D1);
+  const h4 = await api.getBars(ticker, Timeframe.H4);
+  const h1 = await api.getBars(ticker, Timeframe.H1);
+
+  return {
+    symbol: ticker,
+    data: {
+      [Timeframe.D1]: addIndicators(d1),
+      [Timeframe.H4]: addIndicators(h4),
+      [Timeframe.H1]: addIndicators(h1)
+    },
+    livePrice: d1.length > 0 ? d1[d1.length - 1].close : 0
+  };
+  return [];
 };

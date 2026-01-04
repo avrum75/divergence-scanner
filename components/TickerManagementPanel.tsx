@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { searchTickers, MarketType } from '../services/dataService';
+import { api } from '../services/api';
 import { TickerSearchResult } from '../types';
 
 interface TickerManagementPanelProps {
@@ -36,17 +37,25 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
     const dropdownRef = useRef<HTMLDivElement>(null);
 
     // Filter tickers based on marketType from database
-    const [filteredTickers, setFilteredTickers] = useState<string[]>([]);
+    const [filteredTickers, setFilteredTickers] = useState<{ ticker: string, added_at: string, business_score?: string }[]>([]);
+    const [sortOrder, setSortOrder] = useState<'ALPHA' | 'NEWEST'>('ALPHA');
 
     // Load and filter tickers based on marketType
     useEffect(() => {
         const filterTickers = async () => {
-            const { db } = await import('../db');
-            const allWatchlist = await db.watchlist.toArray();
-            const filtered = allWatchlist
-                .filter(w => w.marketType === marketType)
-                .map(w => w.ticker);
-            setFilteredTickers(filtered);
+            try {
+                const allWatchlist = await api.getWatchlist();
+                const filtered = allWatchlist
+                    .filter((w: any) => w.market_type === marketType)
+                    .map((w: any) => ({
+                        ticker: w.ticker,
+                        added_at: w.added_at,
+                        business_score: w.business_score
+                    }));
+                setFilteredTickers(filtered);
+            } catch (e) {
+                console.error("Failed to filter tickers", e);
+            }
         };
         filterTickers();
     }, [marketType, tickers]); // Re-filter when marketType or tickers change
@@ -143,6 +152,23 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                     </button>
                 </div>
 
+                {/* Sort Toggle */}
+                <button
+                    onClick={() => setSortOrder(prev => prev === 'ALPHA' ? 'NEWEST' : 'ALPHA')}
+                    className="mb-2 w-full flex items-center justify-between px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs text-slate-300 transition-colors"
+                >
+                    <span className="font-semibold">Sort:</span>
+                    <span className="flex items-center gap-1">
+                        {sortOrder === 'ALPHA' ? 'Alphabetical (A-Z)' : 'Last Added'}
+                        <svg className="w-3 h-3 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            {sortOrder === 'ALPHA'
+                                ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
+                                : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            }
+                        </svg>
+                    </span>
+                </button>
+
                 <p className="text-xs text-slate-400">Manage tracked assets</p>
             </div>
 
@@ -201,96 +227,114 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                     </div>
                 )}
 
-                {filteredTickers.map((ticker) => {
-                    const hasNotes = tickerNotes[ticker] && tickerNotes[ticker].length > 0;
-                    const isExpanded = expandedNotesTicker === ticker;
-                    const notes = tickerNotes[ticker] || [];
-                    // Sort notes from newest to oldest
-                    const sortedNotes = [...notes].sort((a, b) =>
-                        new Date(b.date).getTime() - new Date(a.date).getTime()
-                    );
+                {filteredTickers
+                    .sort((a, b) => {
+                        if (sortOrder === 'ALPHA') {
+                            return a.ticker.localeCompare(b.ticker);
+                        } else {
+                            // Newest first
+                            return new Date(b.added_at).getTime() - new Date(a.added_at).getTime();
+                        }
+                    })
+                    .map((item) => {
+                        const ticker = item.ticker;
+                        const hasNotes = tickerNotes[ticker] && tickerNotes[ticker].length > 0;
+                        const isExpanded = expandedNotesTicker === ticker;
+                        const notes = tickerNotes[ticker] || [];
+                        // Sort notes from newest to oldest
+                        const sortedNotes = [...notes].sort((a, b) =>
+                            new Date(b.date).getTime() - new Date(a.date).getTime()
+                        );
 
-                    return (
-                        <div key={ticker}>
-                            <div
-                                onClick={() => onSelectTicker(ticker)}
-                                className={`group flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-all duration-200 ${ticker === activeTicker
-                                    ? 'bg-gradient-to-r from-indigo-900/50 to-slate-800 border-indigo-500/50 shadow-lg shadow-indigo-500/10 translate-x-1'
-                                    : 'bg-slate-800/40 border-slate-700/50 hover:bg-slate-800 hover:border-slate-600 hover:translate-x-0.5'
-                                    }`}
-                            >
-                                <div className="flex flex-col">
-                                    <div className="flex items-center gap-2">
-                                        <span className={`font-bold text-lg ${ticker === activeTicker ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
-                                            {ticker}
-                                        </span>
-                                        {syncingTickers.has(ticker) && (
-                                            <div className="w-3 h-3 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin shadow-[0_0_5px_rgba(99,102,241,0.4)]"></div>
+                        return (
+                            <div key={ticker}>
+                                <div
+                                    onClick={() => onSelectTicker(ticker)}
+                                    className={`group flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-all duration-200 ${ticker === activeTicker
+                                        ? 'bg-gradient-to-r from-indigo-900/50 to-slate-800 border-indigo-500/50 shadow-lg shadow-indigo-500/10 translate-x-1'
+                                        : 'bg-slate-800/40 border-slate-700/50 hover:bg-slate-800 hover:border-slate-600 hover:translate-x-0.5'
+                                        }`}
+                                >
+                                    <div className="flex flex-col">
+                                        <div className="flex items-center gap-2">
+                                            <span className={`font-bold text-lg ${ticker === activeTicker ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
+                                                {ticker}
+                                            </span>
+                                            {item.business_score && (
+                                                <span className={`text-xs px-1.5 py-0.5 rounded font-mono font-bold ${parseInt(item.business_score.split('/')[0]) >= 6 ? 'bg-emerald-500/20 text-emerald-400' :
+                                                        parseInt(item.business_score.split('/')[0]) >= 4 ? 'bg-yellow-500/20 text-yellow-400' :
+                                                            'bg-red-500/20 text-red-400'
+                                                    }`}>
+                                                    {item.business_score}
+                                                </span>
+                                            )}
+                                            {syncingTickers.has(ticker) && (
+                                                <div className="w-3 h-3 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin shadow-[0_0_5px_rgba(99,102,241,0.4)]"></div>
+                                            )}
+                                        </div>
+                                        {openTrades.has(ticker) && (
+                                            <span className="text-[8px] font-black bg-emerald-500 text-emerald-950 px-1.5 py-0.5 rounded-sm w-fit mt-0.5 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.2)]">
+                                                TRADING
+                                            </span>
                                         )}
                                     </div>
-                                    {openTrades.has(ticker) && (
-                                        <span className="text-[8px] font-black bg-emerald-500 text-emerald-950 px-1.5 py-0.5 rounded-sm w-fit mt-0.5 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.2)]">
-                                            TRADING
-                                        </span>
-                                    )}
-                                </div>
-                                <div className="flex items-center gap-1">
-                                    {hasNotes && (
+                                    <div className="flex items-center gap-1">
+                                        {hasNotes && (
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setExpandedNotesTicker(isExpanded ? null : ticker);
+                                                }}
+                                                className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${isExpanded
+                                                    ? 'bg-yellow-500/30 text-yellow-300'
+                                                    : 'bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400'
+                                                    }`}
+                                                title={isExpanded ? 'Hide notes' : 'Show notes'}
+                                            >
+                                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                                </svg>
+                                            </button>
+                                        )}
                                         <button
                                             onClick={(e) => {
                                                 e.stopPropagation();
-                                                setExpandedNotesTicker(isExpanded ? null : ticker);
+                                                onRemoveTicker(ticker);
                                             }}
-                                            className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${isExpanded
-                                                ? 'bg-yellow-500/30 text-yellow-300'
-                                                : 'bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400'
-                                                }`}
-                                            title={isExpanded ? 'Hide notes' : 'Show notes'}
+                                            className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 p-1.5 rounded-md hover:bg-red-400/10 transition-all transform hover:scale-110"
+                                            title="Remove Ticker"
                                         >
-                                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                                             </svg>
                                         </button>
-                                    )}
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            onRemoveTicker(ticker);
-                                        }}
-                                        className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 p-1.5 rounded-md hover:bg-red-400/10 transition-all transform hover:scale-110"
-                                        title="Remove Ticker"
-                                    >
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                        </svg>
-                                    </button>
+                                    </div>
                                 </div>
-                            </div>
 
-                            {/* Expanded Notes Section */}
-                            {isExpanded && sortedNotes.length > 0 && (
-                                <div className="mt-1 mb-2 ml-2 mr-2 p-3 bg-slate-900/80 rounded-lg border border-slate-700/50">
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <svg className="w-4 h-4 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
-                                            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-                                        </svg>
-                                        <h4 className="text-sm font-semibold text-white">Notes History</h4>
+                                {/* Expanded Notes Section */}
+                                {isExpanded && sortedNotes.length > 0 && (
+                                    <div className="mt-1 mb-2 ml-2 mr-2 p-3 bg-slate-900/80 rounded-lg border border-slate-700/50">
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <svg className="w-4 h-4 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                                                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                                            </svg>
+                                            <h4 className="text-sm font-semibold text-white">Notes History</h4>
+                                        </div>
+                                        <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
+                                            {sortedNotes.map((noteEntry, index) => (
+                                                <div key={index} className="p-2 bg-slate-800/50 rounded text-xs text-slate-300 border border-slate-700/30">
+                                                    <p className="whitespace-pre-wrap mb-1">{noteEntry.note}</p>
+                                                    <p className="text-[10px] text-slate-500 italic">
+                                                        {new Date(noteEntry.date).toLocaleString()}
+                                                    </p>
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
-                                    <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
-                                        {sortedNotes.map((noteEntry, index) => (
-                                            <div key={index} className="p-2 bg-slate-800/50 rounded text-xs text-slate-300 border border-slate-700/30">
-                                                <p className="whitespace-pre-wrap mb-1">{noteEntry.note}</p>
-                                                <p className="text-[10px] text-slate-500 italic">
-                                                    {new Date(noteEntry.date).toLocaleString()}
-                                                </p>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    );
-                })}
+                                )}
+                            </div>
+                        );
+                    })}
             </div>
         </div>
     );

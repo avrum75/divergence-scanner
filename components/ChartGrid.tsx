@@ -3,6 +3,7 @@ import { IChartApi, LogicalRange, ISeriesApi } from 'lightweight-charts';
 import { TickerData, Timeframe, IndicatorType } from '../types';
 import TradingViewChart from './TradingViewChart';
 import { getTickerDetails } from '../services/dataService';
+import CompanyProfile from './CompanyProfile';
 
 interface ChartGridProps {
   tickerData: TickerData | null;
@@ -229,6 +230,9 @@ const ChartGrid: React.FC<ChartGridProps> = ({ tickerData, loading, onOpenTrade,
           )}
         </h1>
       </div>
+
+      {/* Company Profile Card */}
+      <CompanyProfile ticker={tickerData.symbol} />
 
       <div className="flex-1 grid grid-cols-3 gap-4 min-h-0">
         {renderChartPane(Timeframe.D1, 'Daily')}

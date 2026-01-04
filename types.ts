@@ -50,6 +50,7 @@ export interface ConsolidatedAlert {
   }[];
   price: number;
   timestamp: string;
+  discoveredAt?: string; // When this stock was first discovered by the scanner
 }
 
 export interface Alert {

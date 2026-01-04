@@ -5,9 +5,9 @@ import TickerManagementPanel from './components/TickerManagementPanel';
 import ChartGrid from './components/ChartGrid';
 import DocumentationModal from './components/DocumentationModal';
 import { scanMarket, fetchTickerData, getCachedTickerData, subscribeToSyncs } from './services/dataService';
+import { api } from './services/api';
 import { Alert, TickerData, Trade, Timeframe, ConsolidatedAlert } from './types';
 import { TICKERS as INITIAL_TICKERS } from './constants';
-import { db } from './db';
 
 type SidebarView = 'SCANNER' | 'PORTFOLIO' | 'WATCHLIST';
 
@@ -19,8 +19,23 @@ function App() {
   const [scanning, setScanning] = useState(false);
   const [loadingData, setLoadingData] = useState(false);
   const [trackedTickers, setTrackedTickers] = useState<string[]>(INITIAL_TICKERS);
+  
+  // Track scanning state
+  const getInitialLastScanTime = (): number | null => {
+    const saved = localStorage.getItem('lastScanTime');
+    return saved ? parseInt(saved, 10) : null;
+  };
+  const getInitialScannedTickers = (): Set<string> => {
+    const saved = localStorage.getItem('scannedTickers');
+    return saved ? new Set(JSON.parse(saved)) : new Set<string>();
+  };
+  const lastScanTime = React.useRef<number | null>(getInitialLastScanTime());
+  const scannedTickers = React.useRef<Set<string>>(getInitialScannedTickers());
+  const isInitialMount = React.useRef(true);
+  const initialDataLoaded = React.useRef(false);
   const [scannedStockRatings, setScannedStockRatings] = useState<Record<string, number>>({});
   const [scannedStockNotes, setScannedStockNotes] = useState<Record<string, { note: string; date: string }[]>>({});
+  const [businessScores, setBusinessScores] = useState<Record<string, string>>({}); // ticker -> score (e.g., "6/7")
   const [backlog, setBacklog] = useState<Set<string>>(new Set());
   const [syncingTickers, setSyncingTickers] = useState<Set<string>>(new Set());
   const [hideBacklogged, setHideBacklogged] = useState<boolean>(() => {
@@ -37,9 +52,9 @@ function App() {
     const saved = localStorage.getItem('scannerMinDivergences');
     return saved ? parseInt(saved, 10) : 1;
   });
-  const [sortByRating, setSortByRating] = useState<boolean>(() => {
-    const saved = localStorage.getItem('scannerSortByRating');
-    return saved === 'true';
+  const [sortBy, setSortBy] = useState<'newest' | 'rating'>(() => {
+    const saved = localStorage.getItem('scannerSortBy');
+    return (saved === 'rating' ? 'rating' : 'newest') as 'newest' | 'rating';
   });
 
   const [divergenceType, setDivergenceType] = useState<'REGULAR' | 'HIDDEN' | 'BOTH'>(() => {
@@ -57,6 +72,10 @@ function App() {
   const [onlyTriple, setOnlyTriple] = useState<boolean>(() => localStorage.getItem('scannerOnlyTriple') === 'true');
   const [hideStale, setHideStale] = useState<boolean>(() => localStorage.getItem('scannerHideStale') !== 'false'); // Default TRUE
   const [onlyTrendAligned, setOnlyTrendAligned] = useState<boolean>(() => localStorage.getItem('scannerTrendAligned') === 'true');
+  const [showNewArrivals, setShowNewArrivals] = useState<boolean>(() => {
+    const saved = localStorage.getItem('scannerShowNewArrivals');
+    return saved === 'true';
+  });
   const [scanSensitivity, setScanSensitivity] = useState<number>(() => {
     const saved = localStorage.getItem('scannerSensitivity');
     return saved ? parseInt(saved, 10) : 3; // Default 3 (Fast)
@@ -73,14 +92,45 @@ function App() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [sidebarView, setSidebarView] = useState<SidebarView>('SCANNER');
 
-  const handleScan = useCallback(async (autoSelect: boolean = false, overrideTimeframes?: Timeframe[]) => {
+  const handleScan = useCallback(async (autoSelect: boolean = false, overrideTimeframes?: Timeframe[], tickersToScan?: string[]) => {
     const currentScanId = ++lastScanId.current;
     setScanning(true);
     const tfsToUse = overrideTimeframes || enabledTimeframes;
+    const tickers = tickersToScan || trackedTickers;
+    
     try {
-      const results = await scanMarket(trackedTickers, scanSensitivity, tfsToUse);
+      const results = await scanMarket(tickers);
       if (currentScanId === lastScanId.current) {
-        setAlerts(results);
+        // Merge results with existing alerts (remove old alerts for scanned tickers, add new ones)
+        setAlerts(prev => {
+          const filtered = prev.filter(alert => !tickers.includes(alert.ticker));
+          const merged = [...filtered, ...results];
+          
+          // Save results to database asynchronously
+          api.saveScannerResults(merged).then(() => {
+            console.log(`💾 Saved ${merged.length} scanner results to database`);
+          }).catch((e) => {
+            console.error("Failed to save scanner results:", e);
+          });
+          
+          // Load business scores for newly scanned tickers
+          if (tickers.length > 0) {
+            api.getBusinessScores(tickers).then(scores => {
+              setBusinessScores(prev => ({ ...prev, ...scores }));
+            }).catch(e => {
+              console.error("Failed to load business scores for scanned tickers:", e);
+            });
+          }
+          
+          return merged;
+        });
+        
+        // Update scanned tickers tracking
+        tickers.forEach(ticker => scannedTickers.current.add(ticker));
+        lastScanTime.current = Date.now();
+        localStorage.setItem('lastScanTime', lastScanTime.current.toString());
+        localStorage.setItem('scannedTickers', JSON.stringify(Array.from(scannedTickers.current)));
+        
         // Auto-select only if explicitly requested (e.g. on first load)
         if (autoSelect && results.length > 0 && !selectedTicker) {
           handleSelectTicker(results[0].ticker);
@@ -93,91 +143,196 @@ function App() {
         setScanning(false);
       }
 
-      // PHASE 3: Background Refresh (Silent)
-      // Now safe to re-enable with the optimized request queue and Binance integration
-      (async () => {
-        console.log("🔄 Starting background refresh for all tickers...");
-        // Process in small batches or sequentially with our optimized queue
-        for (const ticker of trackedTickers) {
-          try {
-            await fetchTickerData(ticker, false, 'LOW');
-          } catch (e) {
-            console.warn(`⚠️ Background sync failed for ${ticker}`, e);
-          }
-        }
-        console.log("✅ Background refresh complete. Refreshing scanner signals...");
-
-        // Final scan to update results with fresh data - ONLY COMMIT IF STILL LATEST
-        if (currentScanId === lastScanId.current) {
-          const freshAlerts = await scanMarket(trackedTickers, scanSensitivity, tfsToUse);
-          if (currentScanId === lastScanId.current) {
-            setAlerts(freshAlerts);
-          }
-        }
-      })();
+      // REMOVED: Background refresh that was causing excessive API calls
+      // Background refresh should only happen when user explicitly requests it,
+      // not after every scan. The scan already uses cached data.
     }
   }, [trackedTickers, scanSensitivity, enabledTimeframes, selectedTicker]);
 
-  // Load data from DB on mount
+  // Load data from API on mount
   useEffect(() => {
-    const initDB = async () => {
-      const savedTrades = await db.trades.toArray();
-      setTrades(savedTrades.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
+    const initData = async () => {
+      try {
+        const savedTrades = await api.getTrades();
+        setTrades(savedTrades.sort((a: Trade, b: Trade) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
 
-      const savedWatchlist = await db.watchlist.toArray();
-      if (savedWatchlist.length > 0) {
-        setTrackedTickers(savedWatchlist.map(w => w.ticker));
-      } else {
-        // First run: save initial tickers to DB with STOCKS marketType
-        const records = INITIAL_TICKERS.map(ticker => ({
-          ticker,
-          addedAt: new Date().toISOString(),
-          marketType: 'STOCKS' as const
-        }));
-        await db.watchlist.bulkAdd(records);
-        setTrackedTickers(INITIAL_TICKERS);
-      }
-
-      // Load ratings for scanned stocks
-      const savedRatings = await db.ratings.toArray();
-      const ratings: Record<string, number> = {};
-      savedRatings.forEach(r => {
-        ratings[r.ticker] = r.rating;
-      });
-      setScannedStockRatings(ratings);
-
-      // Load notes for scanned stocks
-      const savedNotes = await db.notes.toArray();
-      const notes: Record<string, { note: string; date: string }[]> = {};
-      savedNotes.forEach(n => {
-        // Handle migration: if notes is a string (old format), convert to array
-        if (typeof n.notes === 'string') {
-          notes[n.ticker] = [{ note: n.notes, date: n.updatedAt || new Date().toISOString() }];
-        } else if (Array.isArray(n.notes)) {
-          notes[n.ticker] = n.notes;
+        // STEP 1: Load watchlist FIRST (includes business_score)
+        const savedWatchlist = await api.getWatchlist();
+        let watchlistTickers: string[] = [];
+        const businessScoresFromWatchlist: Record<string, string> = {};
+        
+        if (savedWatchlist.length > 0) {
+          watchlistTickers = savedWatchlist.map((w: any) => w.ticker);
+          setTrackedTickers(watchlistTickers);
+          
+          // Extract business scores from watchlist response
+          savedWatchlist.forEach((w: any) => {
+            if (w.business_score) {
+              businessScoresFromWatchlist[w.ticker] = w.business_score;
+            }
+          });
+        } else {
+          // First run: save initial tickers to DB with STOCKS marketType
+          for (const ticker of INITIAL_TICKERS) {
+            await api.addToWatchlist(ticker, 'STOCKS');
+          }
+          watchlistTickers = INITIAL_TICKERS;
+          setTrackedTickers(INITIAL_TICKERS);
         }
-      });
-      setScannedStockNotes(notes);
 
-      const savedBacklog = await db.backlog.toArray();
-      setBacklog(new Set(savedBacklog.map(b => b.ticker)));
+        // STEP 2: Set business scores from watchlist (available immediately)
+        setBusinessScores(businessScoresFromWatchlist);
+
+        // STEP 3: Load ratings
+        const savedRatings = await api.getRatings();
+        const ratings: Record<string, number> = {};
+        savedRatings.forEach((r: any) => {
+          ratings[r.ticker] = r.rating;
+        });
+        setScannedStockRatings(ratings);
+
+        // STEP 4: Load notes
+        const savedNotes = await api.getAllNotes();
+        const notes: Record<string, { note: string; date: string }[]> = {};
+
+        // Group notes by ticker if backend returns flat list
+        savedNotes.forEach((n: any) => {
+          if (!notes[n.ticker]) notes[n.ticker] = [];
+          notes[n.ticker].push({ note: n.content, date: n.created_at });
+        });
+
+        setScannedStockNotes(notes);
+
+        // STEP 5: Load backlog
+        const savedBacklog = await api.getBacklog();
+        setBacklog(new Set(savedBacklog.map((b: any) => b.ticker)));
+
+        // STEP 6: Load scanner results LAST (after all watchlist data is loaded)
+        const savedResults = await api.getScannerResults();
+        if (savedResults && savedResults.length > 0) {
+          console.log(`📊 Loaded ${savedResults.length} scanner results from database`);
+          setAlerts(savedResults);
+          // Mark all tickers in saved results as scanned
+          savedResults.forEach((alert: ConsolidatedAlert) => {
+            scannedTickers.current.add(alert.ticker);
+          });
+          // Update last scan time if we have results
+          if (savedResults.length > 0) {
+            const mostRecent = savedResults.reduce((latest: ConsolidatedAlert | null, alert: ConsolidatedAlert) => {
+              if (!latest) return alert;
+              const latestTime = new Date(latest.discoveredAt || latest.timestamp).getTime();
+              const alertTime = new Date(alert.discoveredAt || alert.timestamp).getTime();
+              return alertTime > latestTime ? alert : latest;
+            }, null);
+            if (mostRecent) {
+              const resultTime = new Date(mostRecent.discoveredAt || mostRecent.timestamp).getTime();
+              lastScanTime.current = resultTime;
+              localStorage.setItem('lastScanTime', lastScanTime.current.toString());
+            }
+          }
+        }
+
+        // Mark initial data as loaded
+        initialDataLoaded.current = true;
+
+      } catch (e) {
+        console.error("Failed to load initial data", e);
+        initialDataLoaded.current = true; // Mark as loaded even on error
+      }
     };
-    initDB();
+    initData();
 
     // Subscribe to global sync changes
     const unsubscribe = subscribeToSyncs((tickers) => {
       setSyncingTickers(tickers);
     });
 
-    return () => unsubscribe();
+    // Listen for business analysis updates
+    const handleBusinessAnalysisUpdate = async (event: CustomEvent) => {
+      const { ticker } = event.detail;
+      // Refresh business scores from watchlist (which includes the updated score)
+      try {
+        const watchlist = await api.getWatchlist();
+        const updatedScores: Record<string, string> = {};
+        watchlist.forEach((w: any) => {
+          if (w.business_score) {
+            updatedScores[w.ticker] = w.business_score;
+          }
+        });
+        setBusinessScores(prev => ({ ...prev, ...updatedScores }));
+      } catch (e) {
+        console.error("Failed to refresh business scores after update:", e);
+      }
+    };
+
+    window.addEventListener('businessAnalysisUpdated', handleBusinessAnalysisUpdate as EventListener);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('businessAnalysisUpdated', handleBusinessAnalysisUpdate as EventListener);
+    };
   }, []);
 
-  // Initial Scan - now depends on trackedTickers
+  // Smart Initial Scan - only scan if no results exist or user explicitly requests it
+  useEffect(() => {
+    if (trackedTickers.length === 0) return;
+    if (!initialDataLoaded.current) return; // Wait for initial data to load
+    
+    // On initial mount, check if we have saved results
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      
+      // If we have alerts loaded from database, don't auto-scan
+      // User must explicitly click the scan button to run a new scan
+      if (alerts.length > 0) {
+        console.log(`✅ Loaded ${alerts.length} scanner results from database. Click scan button to refresh.`);
+        return;
+      }
+      
+      // Only auto-scan if no results exist and last scan was more than 1 hour ago
+      const now = Date.now();
+      const oneHour = 60 * 60 * 1000;
+      const shouldScanAll = !lastScanTime.current || (now - lastScanTime.current) >= oneHour;
+      
+      if (shouldScanAll) {
+        console.log("⏰ No saved results found and last scan was more than 1 hour ago, scanning all tickers...");
+        handleScan(true);
+      } else {
+        console.log("✅ Recent scan found, skipping auto-scan. Use manual scan button if needed.");
+        // Still check for new tickers that weren't scanned
+        const newTickers = trackedTickers.filter(t => !scannedTickers.current.has(t));
+        if (newTickers.length > 0) {
+          console.log(`🆕 Found ${newTickers.length} new ticker(s), scanning them...`);
+          handleScan(false, undefined, newTickers);
+        }
+      }
+      return;
+    }
+    
+    // On subsequent updates (ticker added/removed), only scan new tickers
+    const newTickers = trackedTickers.filter(t => !scannedTickers.current.has(t));
+    if (newTickers.length > 0) {
+      console.log(`🆕 New ticker(s) added, scanning: ${newTickers.join(', ')}`);
+      handleScan(false, undefined, newTickers);
+    }
+  }, [trackedTickers, handleScan, alerts.length]);
+
+  // Load business scores when trackedTickers change (refresh from watchlist)
   useEffect(() => {
     if (trackedTickers.length > 0) {
-      handleScan(true); // Pass true to auto-select on first load
+      api.getWatchlist().then(watchlist => {
+        const scores: Record<string, string> = {};
+        watchlist.forEach((w: any) => {
+          if (w.business_score) {
+            scores[w.ticker] = w.business_score;
+          }
+        });
+        setBusinessScores(prev => ({ ...prev, ...scores }));
+      }).catch(e => {
+        console.error("Failed to load business scores from watchlist:", e);
+      });
     }
-  }, [trackedTickers, handleScan]);
+  }, [trackedTickers]);
 
   const handleSelectTicker = async (ticker: string, force: boolean = false) => {
     setSelectedTicker(ticker);
@@ -211,25 +366,32 @@ function App() {
 
   const handleAddTicker = async (ticker: string, marketType: 'STOCKS' | 'CRYPTO') => {
     if (!trackedTickers.includes(ticker)) {
-      setTrackedTickers(prev => [...prev, ticker]);
-      // Save with marketType
-      await db.watchlist.put({
-        ticker,
-        addedAt: new Date().toISOString(),
-        marketType
-      });
+      try {
+        // Save to DB first to ensure consistency for child components fetching from DB
+        await api.addToWatchlist(ticker, marketType);
+        setTrackedTickers(prev => [...prev, ticker]);
+      } catch (e) {
+        console.error("Failed to add ticker to watchlist:", e);
+      }
     }
   };
 
   const handleRemoveTicker = async (ticker: string) => {
-    setTrackedTickers(prev => prev.filter(t => t !== ticker));
-    await db.watchlist.delete(ticker);
+    try {
+      await api.removeFromWatchlist(ticker);
+      setTrackedTickers(prev => prev.filter(t => t !== ticker));
+      // Remove from alerts and scanned tickers
+      setAlerts(prev => prev.filter(alert => alert.ticker !== ticker));
+      scannedTickers.current.delete(ticker);
+      localStorage.setItem('scannedTickers', JSON.stringify(Array.from(scannedTickers.current)));
+    } catch (e) {
+      console.error("Failed to remove ticker from watchlist:", e);
+    }
   };
 
   const handleRatingChange = async (ticker: string, rating: number) => {
     setScannedStockRatings(prev => ({ ...prev, [ticker]: rating }));
-    // Update in ratings table
-    await db.ratings.put({ ticker, rating });
+    await api.setRating(ticker, rating);
   };
 
   const handleFilterChange = (newFilter: 'ALL' | 'BULLISH' | 'BEARISH') => {
@@ -242,9 +404,9 @@ function App() {
     localStorage.setItem('scannerMinDivergences', newMinDivergences.toString());
   };
 
-  const handleSortByRatingChange = (newSortByRating: boolean) => {
-    setSortByRating(newSortByRating);
-    localStorage.setItem('scannerSortByRating', newSortByRating.toString());
+  const handleSortByChange = (newSortBy: 'newest' | 'rating') => {
+    setSortBy(newSortBy);
+    localStorage.setItem('scannerSortBy', newSortBy);
   };
 
   const handleDivergenceTypeChange = (val: 'REGULAR' | 'HIDDEN' | 'BOTH') => {
@@ -291,6 +453,11 @@ function App() {
     handleScan(false, tfs); // Re-scan when timeframes change - PASSING NEW TFS DIRECTLY TO AVOID STALE STATE
   };
 
+  const handleShowNewArrivalsChange = (show: boolean) => {
+    setShowNewArrivals(show);
+    localStorage.setItem('scannerShowNewArrivals', show.toString());
+  };
+
   const handleNotesChange = async (ticker: string, note: string) => {
     if (!note.trim()) return; // Don't save empty notes
 
@@ -307,27 +474,7 @@ function App() {
       };
     });
 
-    // Update in notes table - append to existing notes array
-    const existingRecord = await db.notes.get(ticker);
-    if (existingRecord) {
-      const existingNotes = Array.isArray(existingRecord.notes)
-        ? existingRecord.notes
-        : typeof existingRecord.notes === 'string'
-          ? [{ note: existingRecord.notes, date: existingRecord.updatedAt || new Date().toISOString() }]
-          : [];
-      await db.notes.put({
-        ticker,
-        notes: [...existingNotes, newNoteEntry],
-        updatedAt: new Date().toISOString()
-      });
-    } else {
-      // Create new record
-      await db.notes.put({
-        ticker,
-        notes: [newNoteEntry],
-        updatedAt: new Date().toISOString()
-      });
-    }
+    await api.addNote(ticker, note.trim());
   };
 
   const handleToggleBacklog = async (ticker: string) => {
@@ -336,10 +483,10 @@ function App() {
 
     if (isBacklogged) {
       newBacklog.delete(ticker);
-      await db.backlog.delete(ticker);
+      await api.removeFromBacklog(ticker);
     } else {
       newBacklog.add(ticker);
-      await db.backlog.add({ ticker, addedAt: new Date().toISOString() });
+      await api.addToBacklog(ticker);
     }
 
     setBacklog(newBacklog);
@@ -360,9 +507,6 @@ function App() {
       return;
     }
 
-    // Determine type (simple logic for demo: if mostly green alert, LONG, else assume LONG default)
-    // Ideally user selects. We will default to LONG.
-
     const newTrade: Trade = {
       id: Math.random().toString(36).substr(2, 9),
       ticker,
@@ -370,13 +514,12 @@ function App() {
       amount,
       type: 'LONG',
       timestamp: new Date().toISOString(),
-      // Simulate a random PnL start between -1% and +1% to make the table look alive immediately
       pnlPercent: (Math.random() * 2 - 1)
     };
 
     setTrades(prev => [newTrade, ...prev]);
-    db.trades.add(newTrade);
-    setSidebarView('PORTFOLIO'); // Switch to portfolio view to see the new trade
+    api.addTrade(newTrade);
+    setSidebarView('PORTFOLIO');
   };
 
   const activeSyncingTickers = new Set(syncingTickers);
@@ -477,12 +620,14 @@ function App() {
               onRatingChange={handleRatingChange}
               tickerNotes={scannedStockNotes}
               onNotesChange={handleNotesChange}
+              businessScores={businessScores}
+              businessScores={businessScores}
               filter={filter}
               onFilterChange={handleFilterChange}
               minDivergences={minDivergences}
               onMinDivergencesChange={handleMinDivergencesChange}
-              sortByRating={sortByRating}
-              onSortByRatingChange={handleSortByRatingChange}
+              sortBy={sortBy}
+              onSortByChange={handleSortByChange}
               backlog={backlog}
               onToggleBacklog={handleToggleBacklog}
               hideBacklogged={hideBacklogged}

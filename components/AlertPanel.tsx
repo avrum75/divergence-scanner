@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ConsolidatedAlert, SignalType, IndicatorType, Timeframe } from '../types';
 import { analyzeAlertWithAI } from '../services/geminiService';
 import StarRating from './StarRating';
+import ReactMarkdown from 'react-markdown';
 
 interface AlertPanelProps {
   alerts: ConsolidatedAlert[];
@@ -13,13 +14,14 @@ interface AlertPanelProps {
   onRatingChange?: (ticker: string, rating: number) => void;
   tickerNotes?: Record<string, { note: string; date: string }[]>; // ticker -> array of notes with dates
   onNotesChange?: (ticker: string, note: string) => void; // Adds a new note entry
+  businessScores?: Record<string, string>; // ticker -> score (e.g., "6/7")
   // Filter state props
   filter?: FilterType;
   onFilterChange?: (filter: FilterType) => void;
   minDivergences?: number;
   onMinDivergencesChange?: (minDivergences: number) => void;
-  sortByRating?: boolean;
-  onSortByRatingChange?: (sortByRating: boolean) => void;
+  sortBy?: 'newest' | 'rating';
+  onSortByChange?: (sortBy: 'newest' | 'rating') => void;
   // Backlog props
   backlog?: Set<string>;
   onToggleBacklog?: (ticker: string) => void;
@@ -42,6 +44,8 @@ interface AlertPanelProps {
   onScanSensitivityChange?: (sensitivity: number) => void;
   enabledTimeframes?: Timeframe[];
   onEnabledTimeframesChange?: (timeframes: Timeframe[]) => void;
+  showNewArrivals?: boolean;
+  onShowNewArrivalsChange?: (show: boolean) => void;
   openTrades?: Set<string>;
   syncingTickers?: Set<string>;
 }
@@ -62,12 +66,13 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
   onRatingChange,
   tickerNotes = {},
   onNotesChange,
+  businessScores = {},
   filter: propFilter = 'ALL',
   onFilterChange,
   minDivergences: propMinDivergences = 1,
   onMinDivergencesChange,
-  sortByRating: propSortByRating = false,
-  onSortByRatingChange,
+  sortBy: propSortBy = 'newest',
+  onSortByChange,
   backlog = new Set(),
   onToggleBacklog,
   hideBacklogged = false,
@@ -88,6 +93,8 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
   onScanSensitivityChange,
   enabledTimeframes = AVAILABLE_TIMEFRAMES,
   onEnabledTimeframesChange,
+  showNewArrivals = false,
+  onShowNewArrivalsChange,
   openTrades = new Set(),
   syncingTickers = new Set()
 }) => {
@@ -96,12 +103,13 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
   const [showFilterPanel, setShowFilterPanel] = useState(false);
   const [openNotesTicker, setOpenNotesTicker] = useState<string | null>(null);
   const [newNoteText, setNewNoteText] = useState<string>('');
+  const [openBusinessAnalysisTicker, setOpenBusinessAnalysisTicker] = useState<string | null>(null);
+  const [businessAnalyses, setBusinessAnalyses] = useState<Record<string, { analysis: string; scorecard: any; markdown: string | null }>>({});
+  const [loadingBusinessAnalysis, setLoadingBusinessAnalysis] = useState<Set<string>>(new Set());
 
   // Use props if provided, otherwise use local state (for backward compatibility)
   const filter = propFilter;
   const minDivergences = propMinDivergences;
-  const sortByRating = propSortByRating;
-
   const setFilter = (newFilter: FilterType) => {
     if (onFilterChange) {
       onFilterChange(newFilter);
@@ -111,12 +119,6 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
   const setMinDivergences = (newMinDivergences: number) => {
     if (onMinDivergencesChange) {
       onMinDivergencesChange(newMinDivergences);
-    }
-  };
-
-  const setSortByRating = (newSortByRating: boolean) => {
-    if (onSortByRatingChange) {
-      onSortByRatingChange(newSortByRating);
     }
   };
 
@@ -164,6 +166,89 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
     setOpenNotesTicker(null);
   };
 
+  const parseBusinessAnalysis = (analysis: string) => {
+    try {
+      let braceCount = 0;
+      let jsonStart = -1;
+      let jsonEnd = -1;
+
+      for (let i = 0; i < analysis.length; i++) {
+        if (analysis[i] === '{') {
+          if (jsonStart === -1) {
+            jsonStart = i;
+          }
+          braceCount++;
+        } else if (analysis[i] === '}') {
+          braceCount--;
+          if (braceCount === 0 && jsonStart !== -1) {
+            jsonEnd = i;
+            break;
+          }
+        }
+      }
+
+      if (jsonStart !== -1 && jsonEnd !== -1) {
+        const jsonStr = analysis.substring(jsonStart, jsonEnd + 1);
+        const jsonData = JSON.parse(jsonStr);
+
+        let markdownPart = analysis.substring(jsonEnd + 1).trim();
+        markdownPart = markdownPart
+          .replace(/^[-]{3,}\s*\n?/m, '')
+          .replace(/^##\s*Detailed\s*Analysis\s*\n?/im, '')
+          .replace(/^\s*\n\s*\n/gm, '\n')
+          .trim();
+        markdownPart = markdownPart.replace(/```json\s*\{[\s\S]*?\}\s*```/gi, '');
+        markdownPart = markdownPart.replace(/```\s*\{[\s\S]*?\}\s*```/gi, '');
+
+        return { scorecard: jsonData, markdown: markdownPart || null };
+      } else {
+        return { scorecard: null, markdown: analysis };
+      }
+    } catch (err) {
+      console.error('Error parsing business analysis:', err);
+      return { scorecard: null, markdown: analysis };
+    }
+  };
+
+  const handleBusinessAnalysisClick = async (e: React.MouseEvent, ticker: string) => {
+    e.stopPropagation();
+    const isOpening = openBusinessAnalysisTicker !== ticker;
+    setOpenBusinessAnalysisTicker(isOpening ? ticker : null);
+
+    if (isOpening && !businessAnalyses[ticker]) {
+      // Load the analysis
+      setLoadingBusinessAnalysis(prev => new Set(prev).add(ticker));
+      const normalizedTicker = ticker.replace(/^X:/, '').toUpperCase();
+      const API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5001';
+      
+      try {
+        const res = await fetch(`${API_URL}/api/good_business/${normalizedTicker}`);
+        if (res.ok) {
+          const savedAnalysis = await res.json();
+          if (savedAnalysis && savedAnalysis.analysis) {
+            const parsed = parseBusinessAnalysis(savedAnalysis.analysis);
+            setBusinessAnalyses(prev => ({
+              ...prev,
+              [ticker]: {
+                analysis: savedAnalysis.analysis,
+                scorecard: parsed.scorecard,
+                markdown: parsed.markdown
+              }
+            }));
+          }
+        }
+      } catch (err) {
+        console.error('Error loading business analysis:', err);
+      } finally {
+        setLoadingBusinessAnalysis(prev => {
+          const next = new Set(prev);
+          next.delete(ticker);
+          return next;
+        });
+      }
+    }
+  };
+
   const filteredAlerts = alerts.filter(alert => {
     // Filter by signal type (BULLISH/BEARISH/ALL)
     if (filter !== 'ALL') {
@@ -202,26 +287,70 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
     // Filter out backlogged if requested
     if (hideBacklogged && backlog.has(alert.ticker)) return false;
 
+    // Filter by new arrivals (discovered in last trading day)
+    if (showNewArrivals) {
+      // If no discoveredAt, skip this alert (it's an old alert from before tracking)
+      if (!alert.discoveredAt) {
+        return false;
+      }
+      
+      const discoveredDate = new Date(alert.discoveredAt);
+      const now = new Date();
+      
+      // Get the start of today in local time
+      const today = new Date(now);
+      today.setHours(0, 0, 0, 0);
+      
+      // Calculate the start of the last trading day
+      let lastTradingDay = new Date(today);
+      const dayOfWeek = today.getDay();
+      
+      // If it's Sunday (0), go back to Friday
+      if (dayOfWeek === 0) {
+        lastTradingDay.setDate(today.getDate() - 2);
+      }
+      // If it's Saturday (6), go back to Friday
+      else if (dayOfWeek === 6) {
+        lastTradingDay.setDate(today.getDate() - 1);
+      }
+      // Otherwise, it's a weekday, so last trading day is today
+      // (no change needed)
+      
+      // Normalize both dates to midnight for comparison
+      const discoveredMidnight = new Date(discoveredDate);
+      discoveredMidnight.setHours(0, 0, 0, 0);
+      
+      // Check if discovered on or after the start of last trading day
+      // We want to include anything discovered from the start of last trading day until now
+      if (discoveredMidnight < lastTradingDay) {
+        return false;
+      }
+    }
+
     return true;
   }).sort((a, b) => {
-    // 1. Backlog always goes to the bottom
+    // Sort by user preference
+    if (propSortBy === 'rating') {
+      // Sort by rating (highest first), then by timestamp
+      const ratingA = tickerRatings[a.ticker] || 0;
+      const ratingB = tickerRatings[b.ticker] || 0;
+      if (ratingB !== ratingA) {
+        return ratingB - ratingA; // Higher rating first
+      }
+      // If ratings are equal, sort by timestamp (newest first)
+      return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    } else {
+      // Sort by newest (timestamp) first
+      return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    }
+  }).sort((a, b) => {
+    // Backlog always goes to the bottom (after main sort)
     const isBacklogA = backlog.has(a.ticker);
     const isBacklogB = backlog.has(b.ticker);
     if (isBacklogA !== isBacklogB) {
       return isBacklogA ? 1 : -1;
     }
-
-    // 2. Sort by rating if enabled
-    if (sortByRating) {
-      const ratingA = tickerRatings[a.ticker] || 0;
-      const ratingB = tickerRatings[b.ticker] || 0;
-      if (ratingB !== ratingA) {
-        return ratingB - ratingA;
-      }
-    }
-
-    // 3. Default: Most recent signals first
-    return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    return 0; // Maintain the order from the previous sort
   });
 
   return (
@@ -282,19 +411,40 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
               ))}
             </div>
             <div className="border-t border-slate-700 pt-3">
-              <h3 className="text-sm font-semibold text-white mb-3">View Options</h3>
-              <div className="space-y-3">
+              <h3 className="text-sm font-semibold text-white mb-3">Sort By</h3>
+              <div className="space-y-2">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
-                    type="checkbox"
-                    checked={propSortByRating}
-                    onChange={(e) => onSortByRatingChange && onSortByRatingChange(e.target.checked)}
-                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 rounded focus:ring-indigo-500 focus:ring-2"
+                    type="radio"
+                    name="sortBy"
+                    value="newest"
+                    checked={propSortBy === 'newest'}
+                    onChange={() => onSortByChange && onSortByChange('newest')}
+                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 focus:ring-indigo-500 focus:ring-2"
                   />
                   <span className="text-sm text-slate-300">
-                    Sort by rating (highest first)
+                    Newest
                   </span>
                 </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="sortBy"
+                    value="rating"
+                    checked={propSortBy === 'rating'}
+                    onChange={() => onSortByChange && onSortByChange('rating')}
+                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 focus:ring-indigo-500 focus:ring-2"
+                  />
+                  <span className="text-sm text-slate-300">
+                    Highest Rating
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div className="border-t border-slate-700 pt-3">
+              <h3 className="text-sm font-semibold text-white mb-3">Filter</h3>
+              <div className="space-y-3">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
@@ -304,6 +454,17 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
                   />
                   <span className="text-sm text-slate-300">
                     Hide backlogged tickers
+                  </span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showNewArrivals}
+                    onChange={(e) => onShowNewArrivalsChange && onShowNewArrivalsChange(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 bg-slate-700 border-slate-600 rounded focus:ring-indigo-500 focus:ring-2"
+                  />
+                  <span className="text-sm text-slate-300">
+                    New arrivals (last trading day)
                   </span>
                 </label>
               </div>
@@ -483,9 +644,30 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
               </button>
             )}
             <div className="flex justify-between items-start mb-2">
-              <div className="flex flex-col">
-                <div className="flex items-center gap-2">
+              <div className="flex flex-col flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-bold text-lg text-white">{alert.ticker}</span>
+                  {businessScores && businessScores[alert.ticker] && (
+                    <button
+                      onClick={(e) => handleBusinessAnalysisClick(e, alert.ticker)}
+                      className={`text-xs px-1.5 py-0.5 rounded font-mono font-bold cursor-pointer hover:opacity-80 transition-opacity ${
+                        (() => {
+                          const score = businessScores[alert.ticker];
+                          if (!score) return '';
+                          const [passed, total] = score.split('/').map(Number);
+                          if (passed >= 6) return 'bg-emerald-500/20 text-emerald-400';
+                          if (passed >= 4) return 'bg-yellow-500/20 text-yellow-400';
+                          return 'bg-red-500/20 text-red-400';
+                        })()
+                      }`}
+                      title="Click to view Good Business Analysis"
+                    >
+                      {businessScores[alert.ticker]}
+                      {loadingBusinessAnalysis.has(alert.ticker) && (
+                        <span className="ml-1 inline-block w-2 h-2 border border-current border-t-transparent rounded-full animate-spin"></span>
+                      )}
+                    </button>
+                  )}
                   {syncingTickers.has(alert.ticker) && (
                     <div className="w-3 h-3 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
                   )}
@@ -653,6 +835,78 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
             {analysisResult && analysisResult.id.startsWith(alert.ticker) && (
               <div className="mt-3 p-2 bg-slate-900/50 rounded text-xs text-slate-300 border border-slate-700/50 italic">
                 {analysisResult.text}
+              </div>
+            )}
+
+            {/* Good Business Analysis */}
+            {businessScores && businessScores[alert.ticker] && (
+              <div className="mt-2">
+                <button
+                  onClick={(e) => handleBusinessAnalysisClick(e, alert.ticker)}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={openBusinessAnalysisTicker === alert.ticker ? "M5 15l7-7 7 7" : "M19 9l-7 7-7-7"} />
+                  </svg>
+                  Good Business Analysis
+                  {loadingBusinessAnalysis.has(alert.ticker) && (
+                    <div className="w-3 h-3 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin ml-1"></div>
+                  )}
+                </button>
+
+                {openBusinessAnalysisTicker === alert.ticker && businessAnalyses[alert.ticker] && (
+                  <div className="mt-2 p-3 bg-slate-900/50 rounded text-xs border border-slate-700/50">
+                    {businessAnalyses[alert.ticker].scorecard && (
+                      <div className="mb-4 pb-3 border-b border-slate-700">
+                        <div className="flex items-center justify-between mb-2">
+                          <h5 className="text-xs font-bold text-white">Good Business Scorecard</h5>
+                          <div className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                            businessAnalyses[alert.ticker].scorecard.verdict?.is_good_business
+                              ? 'bg-emerald-500/20 text-emerald-400'
+                              : 'bg-red-500/20 text-red-400'
+                          }`}>
+                            {businessAnalyses[alert.ticker].scorecard.verdict?.score || 'N/A'}
+                          </div>
+                        </div>
+                        {businessAnalyses[alert.ticker].scorecard.verdict?.summary && (
+                          <p className="text-[10px] text-slate-300 mb-2">{businessAnalyses[alert.ticker].scorecard.verdict.summary}</p>
+                        )}
+                        {businessAnalyses[alert.ticker].scorecard.metrics && (
+                          <div className="grid grid-cols-2 gap-2 mt-2">
+                            {Object.entries(businessAnalyses[alert.ticker].scorecard.metrics).map(([key, metric]: [string, any]) => (
+                              <div key={key} className={`p-1.5 rounded text-[10px] ${
+                                metric.pass ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-red-500/10 border border-red-500/20'
+                              }`}>
+                                <div className="font-semibold text-white">{key}</div>
+                                {metric.reason && (
+                                  <div className="text-slate-400 mt-0.5">{metric.reason}</div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {businessAnalyses[alert.ticker].markdown && (
+                      <div className="text-slate-300 text-[10px] prose prose-invert max-w-none">
+                        <ReactMarkdown
+                          components={{
+                            p: ({ children }) => <p className="mb-2" style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{children}</p>,
+                            strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                            ul: ({ children }) => <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>,
+                            ol: ({ children }) => <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>,
+                            li: ({ children }) => <li style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{children}</li>,
+                            h1: ({ children }) => <h1 className="text-sm font-bold text-white mt-2 mb-1">{children}</h1>,
+                            h2: ({ children }) => <h2 className="text-xs font-semibold text-white mt-2 mb-1">{children}</h2>,
+                            h3: ({ children }) => <h3 className="text-xs font-semibold text-white mt-1 mb-1">{children}</h3>,
+                          }}
+                        >
+                          {businessAnalyses[alert.ticker].markdown}
+                        </ReactMarkdown>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

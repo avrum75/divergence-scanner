@@ -13,8 +13,21 @@ View your app in AI Studio: https://ai.studio/apps/drive/1raMOZtC4UDAvIeKpjtBpbT
 **Prerequisites:**  Node.js
 
 
-1. Install dependencies:
+1. Install frontend dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+
+2. Set up the backend:
+   ```bash
+   cd backend
+   pip install -r requirements.txt
+   export FMP_API_KEY=your_api_key_here  # Get free key at https://financialmodelingprep.com/
+   python main.py
+   ```
+   The backend will run on `http://localhost:8000`
+
+3. Set the API keys in `.env.local` (frontend):
+   - `GEMINI_API_KEY` - Your Gemini API key (for AI analysis)
+   - `POLYGON_API_KEY` - Your Polygon.io API key (for market data)
+
+4. Run the frontend app:
    `npm run dev`
