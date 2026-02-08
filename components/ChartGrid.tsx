@@ -115,42 +115,23 @@ const ChartGrid: React.FC<ChartGridProps> = ({ tickerData, loading, onOpenTrade,
 
   const renderChartPane = (tf: Timeframe, label: string) => {
     const data = tickerData.data[tf];
-    if (!data) return null;
+    if (!data || data.length === 0) {
+      // If data is empty, don't show loading overlay - just return null
+      // The loading state is handled at a higher level
+      return null;
+    }
 
-    // Check if data is stale (> 24 hours old)
-    const now = Date.now();
-    const lastBar = data.length > 0 ? data[data.length - 1] : null;
-    const lastBarTime = lastBar ? new Date(lastBar.time).getTime() : 0;
-
-    // Relaxed threshold: 3 days (259200000ms) to account for weekends and holidays
-    const threshold = 259200000;
-    const isOutOfSync = !lastBar || (now - lastBarTime > threshold);
+    // If we have data, don't show loading overlay - background syncs will update it if needed
+    // The sync logic in performSync checks if we have the latest available bar from the market
+    // So we don't need to show loading here - data updates happen in background
 
     return (
-      <div className={`flex flex-col h-full bg-slate-900 border rounded-lg overflow-hidden transition-all relative ${isOutOfSync ? 'border-amber-500/50' : 'border-slate-800'}`}>
-        <div className={`px-4 py-2 border-b flex justify-between items-center ${isOutOfSync ? 'bg-amber-500/10 border-amber-500/20' : 'bg-slate-800/50 border-slate-800'}`}>
-          <span className={`font-bold text-sm ${isOutOfSync ? 'text-amber-400' : 'text-slate-200'}`}>
+      <div className="flex flex-col h-full bg-slate-900 border rounded-lg overflow-hidden transition-all relative border-slate-800">
+        <div className="px-4 py-2 border-b flex justify-between items-center bg-slate-800/50 border-slate-800">
+          <span className="font-bold text-sm text-slate-200">
             {label} ({tf})
           </span>
-          {isOutOfSync && (
-            <span className="text-[10px] font-bold bg-amber-500 text-slate-950 px-1.5 rounded animate-pulse">
-              SYNCING...
-            </span>
-          )}
         </div>
-
-        {/* Loading Overlay */}
-        {isOutOfSync && (
-          <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm z-20 flex flex-col items-center justify-center">
-            <div className="flex flex-col items-center gap-4">
-              <div className="w-16 h-16 border-4 border-amber-500/30 border-t-amber-500 rounded-full animate-spin"></div>
-              <div className="text-amber-400 text-base font-semibold">Syncing {label}...</div>
-              <div className="text-slate-400 text-sm text-center max-w-xs">
-                Downloading historical data
-              </div>
-            </div>
-          </div>
-        )}
 
         <div className="flex-1 flex flex-col min-h-0 bg-slate-950">
           {/* Main Price Chart */}

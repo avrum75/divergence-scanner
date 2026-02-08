@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ConsolidatedAlert, SignalType, IndicatorType, Timeframe } from '../types';
 import { analyzeAlertWithAI } from '../services/geminiService';
 import StarRating from './StarRating';
@@ -15,6 +15,7 @@ interface AlertPanelProps {
   tickerNotes?: Record<string, { note: string; date: string }[]>; // ticker -> array of notes with dates
   onNotesChange?: (ticker: string, note: string) => void; // Adds a new note entry
   businessScores?: Record<string, string>; // ticker -> score (e.g., "6/7")
+  lastScanTime?: number | null;
   // Filter state props
   filter?: FilterType;
   onFilterChange?: (filter: FilterType) => void;
@@ -67,6 +68,7 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
   tickerNotes = {},
   onNotesChange,
   businessScores = {},
+  lastScanTime,
   filter: propFilter = 'ALL',
   onFilterChange,
   minDivergences: propMinDivergences = 1,
@@ -106,6 +108,24 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
   const [openBusinessAnalysisTicker, setOpenBusinessAnalysisTicker] = useState<string | null>(null);
   const [businessAnalyses, setBusinessAnalyses] = useState<Record<string, { analysis: string; scorecard: any; markdown: string | null }>>({});
   const [loadingBusinessAnalysis, setLoadingBusinessAnalysis] = useState<Set<string>>(new Set());
+
+  // Auto-update staleness indicator every minute
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTick(t => t + 1), 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const formatStaleness = (lastScan: number | null | undefined): { text: string; color: string } => {
+    if (!lastScan) return { text: 'Never scanned', color: 'text-red-400' };
+    const elapsed = Date.now() - lastScan;
+    const minutes = Math.floor(elapsed / 60000);
+    const hours = Math.floor(elapsed / 3600000);
+    if (minutes < 1) return { text: 'Scanned just now', color: 'text-emerald-400' };
+    if (minutes < 30) return { text: `Scanned ${minutes}m ago`, color: 'text-emerald-400' };
+    if (minutes < 120) return { text: `Scanned ${minutes}m ago`, color: 'text-yellow-400' };
+    return { text: `Scanned ${hours}h ago`, color: 'text-red-400' };
+  };
 
   // Use props if provided, otherwise use local state (for backward compatibility)
   const filter = propFilter;
@@ -389,6 +409,12 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
             Filter
           </button>
         </div>
+
+        {lastScanTime !== undefined && (
+          <div className={`text-[10px] font-medium mb-3 ${formatStaleness(lastScanTime).color}`}>
+            {formatStaleness(lastScanTime).text}
+          </div>
+        )}
 
         {showFilterPanel && (
           <div className="mb-4 p-3 bg-slate-800 rounded-lg border border-slate-700">

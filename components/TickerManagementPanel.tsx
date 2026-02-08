@@ -38,7 +38,7 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
 
     // Filter tickers based on marketType from database
     const [filteredTickers, setFilteredTickers] = useState<{ ticker: string, added_at: string, business_score?: string }[]>([]);
-    const [sortOrder, setSortOrder] = useState<'ALPHA' | 'NEWEST'>('ALPHA');
+    const [sortOrder, setSortOrder] = useState<'ALPHA' | 'NEWEST' | 'SCORE'>('ALPHA');
 
     // Load and filter tickers based on marketType
     useEffect(() => {
@@ -180,16 +180,22 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
 
                 {/* Sort Toggle */}
                 <button
-                    onClick={() => setSortOrder(prev => prev === 'ALPHA' ? 'NEWEST' : 'ALPHA')}
+                    onClick={() => setSortOrder(prev => {
+                        if (prev === 'ALPHA') return 'NEWEST';
+                        if (prev === 'NEWEST') return 'SCORE';
+                        return 'ALPHA';
+                    })}
                     className="mb-2 w-full flex items-center justify-between px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs text-slate-300 transition-colors"
                 >
                     <span className="font-semibold">Sort:</span>
                     <span className="flex items-center gap-1">
-                        {sortOrder === 'ALPHA' ? 'Alphabetical (A-Z)' : 'Last Added'}
+                        {sortOrder === 'ALPHA' ? 'Alphabetical (A-Z)' : sortOrder === 'NEWEST' ? 'Last Added' : 'Score (High to Low)'}
                         <svg className="w-3 h-3 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             {sortOrder === 'ALPHA'
                                 ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
-                                : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                : sortOrder === 'NEWEST'
+                                ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                             }
                         </svg>
                     </span>
@@ -257,9 +263,35 @@ const TickerManagementPanel: React.FC<TickerManagementPanelProps> = ({
                     .sort((a, b) => {
                         if (sortOrder === 'ALPHA') {
                             return a.ticker.localeCompare(b.ticker);
-                        } else {
+                        } else if (sortOrder === 'NEWEST') {
                             // Newest first
                             return new Date(b.added_at).getTime() - new Date(a.added_at).getTime();
+                        } else {
+                            // SCORE: Sort by business score (highest first)
+                            // Parse score like "5/7" -> 5/7 = 0.714
+                            const parseScore = (score?: string): number => {
+                                if (!score) return -1; // No score goes to the end
+                                const parts = score.split('/');
+                                if (parts.length === 2) {
+                                    const passed = parseFloat(parts[0]);
+                                    const total = parseFloat(parts[1]);
+                                    if (total > 0) return passed / total;
+                                }
+                                return -1;
+                            };
+                            
+                            const scoreA = parseScore(a.business_score);
+                            const scoreB = parseScore(b.business_score);
+                            
+                            // If both have scores, sort by score descending
+                            if (scoreA >= 0 && scoreB >= 0) {
+                                return scoreB - scoreA;
+                            }
+                            // If only one has a score, it comes first
+                            if (scoreA >= 0) return -1;
+                            if (scoreB >= 0) return 1;
+                            // If neither has a score, maintain current order (or sort alphabetically)
+                            return a.ticker.localeCompare(b.ticker);
                         }
                     })
                     .map((item) => {

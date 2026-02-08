@@ -27,6 +27,18 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Divergence Scanner API")
 
+# Startup event to verify database tables
+@app.on_event("startup")
+async def startup_event():
+    """Ensure database tables exist on startup"""
+    try:
+        models.Base.metadata.create_all(bind=engine)
+        print("✅ Database tables verified/created")
+    except Exception as e:
+        print(f"❌ Error creating database tables: {e}")
+        import traceback
+        traceback.print_exc()
+
 # CORS middleware to allow frontend requests
 app.add_middleware(
     CORSMiddleware,
@@ -444,73 +456,81 @@ class WatchlistItemResponse(BaseModel):
 
 @app.get("/api/watchlist", response_model=List[WatchlistItemResponse])
 def get_watchlist(db: Session = Depends(get_db)):
-    # Fetch watchlist items
-    watchlist_items = db.query(models.WatchlistItem).all()
-    
-    # Fetch analyses for these tickers
-    tickers = [item.ticker for item in watchlist_items]
-    analyses = db.query(models.GoodBusinessAnalysis).filter(models.GoodBusinessAnalysis.ticker.in_(tickers)).all()
-    
-    # Map analyses by ticker
-    analysis_map = {a.ticker: a.analysis for a in analyses}
-    
-    results = []
-    for item in watchlist_items:
-        score = None
-        if item.ticker in analysis_map:
-            try:
-                # Strip markdown code block markers if present
-                analysis_text = analysis_map[item.ticker].strip()
-                if analysis_text.startswith("```json"):
-                    analysis_text = analysis_text[7:]
-                if analysis_text.startswith("```"):
-                    analysis_text = analysis_text[3:]
-                if analysis_text.endswith("```"):
-                    analysis_text = analysis_text[:-3]
-                analysis_text = analysis_text.strip()
-                
-                # Extract JSON from the beginning
-                brace_count = 0
-                json_start = -1
-                json_end = -1
-                for i, char in enumerate(analysis_text):
-                    if char == '{':
-                        if json_start == -1:
-                            json_start = i
-                        brace_count += 1
-                    elif char == '}':
-                        brace_count -= 1
-                        if brace_count == 0 and json_start != -1:
-                            json_end = i
-                            break
-                
-                if json_start != -1 and json_end != -1:
-                    json_str = analysis_text[json_start:json_end + 1]
-                    analysis_json = json.loads(json_str)
-                else:
-                    analysis_json = json.loads(analysis_text)
-                
-                # Try to get score from verdict.score first
-                if "verdict" in analysis_json and "score" in analysis_json["verdict"]:
-                    score = analysis_json["verdict"]["score"]
-                # If not available, calculate from metrics
-                elif "metrics" in analysis_json:
-                    metrics = analysis_json["metrics"]
-                    passed = sum(1 for metric in metrics.values() if isinstance(metric, dict) and metric.get("pass") is True)
-                    total = len([m for m in metrics.values() if isinstance(m, dict) and "pass" in m])
-                    if total > 0:
-                        score = f"{passed}/{total}"
-            except Exception as e:
-                print(f"Error parsing analysis for {item.ticker}: {e}")
-                
-        results.append(WatchlistItemResponse(
-            ticker=item.ticker,
-            market_type=item.market_type,
-            added_at=item.added_at,
-            business_score=score
-        ))
+    try:
+        # Fetch watchlist items
+        watchlist_items = db.query(models.WatchlistItem).all()
         
-    return results
+        # Fetch analyses for these tickers
+        tickers = [item.ticker for item in watchlist_items]
+        analyses = []
+        if tickers:
+            analyses = db.query(models.GoodBusinessAnalysis).filter(models.GoodBusinessAnalysis.ticker.in_(tickers)).all()
+        
+        # Map analyses by ticker
+        analysis_map = {a.ticker: a.analysis for a in analyses}
+        
+        results = []
+        for item in watchlist_items:
+            score = None
+            if item.ticker in analysis_map:
+                try:
+                    # Strip markdown code block markers if present
+                    analysis_text = analysis_map[item.ticker].strip()
+                    if analysis_text.startswith("```json"):
+                        analysis_text = analysis_text[7:]
+                    if analysis_text.startswith("```"):
+                        analysis_text = analysis_text[3:]
+                    if analysis_text.endswith("```"):
+                        analysis_text = analysis_text[:-3]
+                    analysis_text = analysis_text.strip()
+                    
+                    # Extract JSON from the beginning
+                    brace_count = 0
+                    json_start = -1
+                    json_end = -1
+                    for i, char in enumerate(analysis_text):
+                        if char == '{':
+                            if json_start == -1:
+                                json_start = i
+                            brace_count += 1
+                        elif char == '}':
+                            brace_count -= 1
+                            if brace_count == 0 and json_start != -1:
+                                json_end = i
+                                break
+                    
+                    if json_start != -1 and json_end != -1:
+                        json_str = analysis_text[json_start:json_end + 1]
+                        analysis_json = json.loads(json_str)
+                    else:
+                        analysis_json = json.loads(analysis_text)
+                    
+                    # Try to get score from verdict.score first
+                    if "verdict" in analysis_json and "score" in analysis_json["verdict"]:
+                        score = analysis_json["verdict"]["score"]
+                    # If not available, calculate from metrics
+                    elif "metrics" in analysis_json:
+                        metrics = analysis_json["metrics"]
+                        passed = sum(1 for metric in metrics.values() if isinstance(metric, dict) and metric.get("pass") is True)
+                        total = len([m for m in metrics.values() if isinstance(m, dict) and "pass" in m])
+                        if total > 0:
+                            score = f"{passed}/{total}"
+                except Exception as e:
+                    print(f"Error parsing analysis for {item.ticker}: {e}")
+                    
+            results.append(WatchlistItemResponse(
+                ticker=item.ticker,
+                market_type=item.market_type,
+                added_at=item.added_at,
+                business_score=score
+            ))
+            
+        return results
+    except Exception as e:
+        import traceback
+        error_detail = f"Error getting watchlist: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=error_detail)
 
 @app.post("/api/watchlist")
 def add_watchlist(item: WatchlistCreate, db: Session = Depends(get_db)):
@@ -604,18 +624,24 @@ def add_trade(trade: TradeCreate, db: Session = Depends(get_db)):
 # Bars (Market Data)
 @app.get("/api/bars/{ticker}/{timeframe}")
 def get_bars(ticker: str, timeframe: str, limit: Optional[int] = None, sort: str = "asc", db: Session = Depends(get_db)):
-    query = db.query(models.BarRecord)\
-        .filter(models.BarRecord.ticker == ticker, models.BarRecord.timeframe == timeframe)
-    
-    if sort == "desc":
-        query = query.order_by(models.BarRecord.time.desc())
-    else:
-        query = query.order_by(models.BarRecord.time.asc())
+    try:
+        query = db.query(models.BarRecord)\
+            .filter(models.BarRecord.ticker == ticker, models.BarRecord.timeframe == timeframe)
         
-    if limit:
-        query = query.limit(limit)
-        
-    return query.all()
+        if sort == "desc":
+            query = query.order_by(models.BarRecord.time.desc())
+        else:
+            query = query.order_by(models.BarRecord.time.asc())
+            
+        if limit:
+            query = query.limit(limit)
+            
+        return query.all()
+    except Exception as e:
+        import traceback
+        error_detail = f"Error getting bars for {ticker}/{timeframe}: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=error_detail)
 
 @app.post("/api/bars/bulk")
 def create_bars(bars: List[BarData], db: Session = Depends(get_db)):
@@ -667,7 +693,13 @@ def create_bars(bars: List[BarData], db: Session = Depends(get_db)):
 # Sync Status
 @app.get("/api/sync_status/{id}")
 def get_sync_status(id: str, db: Session = Depends(get_db)):
-    return db.query(models.SyncStatus).filter(models.SyncStatus.id == id).first()
+    try:
+        return db.query(models.SyncStatus).filter(models.SyncStatus.id == id).first()
+    except Exception as e:
+        import traceback
+        error_detail = f"Error getting sync status for {id}: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=error_detail)
 
 @app.post("/api/sync_status")
 def update_sync_status(status: SyncStatusUpdate, db: Session = Depends(get_db)):
@@ -720,79 +752,85 @@ def get_business_scores(tickers: str = Query(..., description="Comma-separated l
     Query param: tickers=comma-separated list (e.g., tickers=AAPL,GOOGL,NVDA)
     Returns: { "AAPL": "6/7", "GOOGL": null, ... }
     """
-    ticker_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
-    if not ticker_list:
-        return {}
-    
-    analyses = db.query(models.GoodBusinessAnalysis).filter(models.GoodBusinessAnalysis.ticker.in_(ticker_list)).all()
-    
-    result = {}
-    for analysis in analyses:
-        try:
-            # Strip markdown code block markers if present
-            analysis_text = analysis.analysis.strip()
-            if analysis_text.startswith("```json"):
-                analysis_text = analysis_text[7:]  # Remove ```json
-            if analysis_text.startswith("```"):
-                analysis_text = analysis_text[3:]  # Remove ```
-            if analysis_text.endswith("```"):
-                analysis_text = analysis_text[:-3]  # Remove trailing ```
-            analysis_text = analysis_text.strip()
-            
-            # Try to extract JSON from the beginning (in case there's markdown after)
-            # Find the first { and match until the closing }
-            brace_count = 0
-            json_start = -1
-            json_end = -1
-            for i, char in enumerate(analysis_text):
-                if char == '{':
-                    if json_start == -1:
-                        json_start = i
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0 and json_start != -1:
-                        json_end = i
-                        break
-            
-            if json_start != -1 and json_end != -1:
-                json_str = analysis_text[json_start:json_end + 1]
-                analysis_json = json.loads(json_str)
-            else:
-                # Fallback: try parsing the whole thing
-                analysis_json = json.loads(analysis_text)
-            
-            # Try to get score from verdict.score first
-            score = None
-            if "verdict" in analysis_json and "score" in analysis_json["verdict"]:
-                score = analysis_json["verdict"]["score"]
-            # If not available, calculate from metrics
-            elif "metrics" in analysis_json:
-                metrics = analysis_json["metrics"]
-                passed = sum(1 for metric in metrics.values() if isinstance(metric, dict) and metric.get("pass") is True)
-                total = len([m for m in metrics.values() if isinstance(m, dict) and "pass" in m])
-                if total > 0:
-                    score = f"{passed}/{total}"
-            if score:
-                result[analysis.ticker] = score
-            else:
+    try:
+        ticker_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
+        if not ticker_list:
+            return {}
+        
+        analyses = db.query(models.GoodBusinessAnalysis).filter(models.GoodBusinessAnalysis.ticker.in_(ticker_list)).all()
+        
+        result = {}
+        for analysis in analyses:
+            try:
+                # Strip markdown code block markers if present
+                analysis_text = analysis.analysis.strip()
+                if analysis_text.startswith("```json"):
+                    analysis_text = analysis_text[7:]  # Remove ```json
+                if analysis_text.startswith("```"):
+                    analysis_text = analysis_text[3:]  # Remove ```
+                if analysis_text.endswith("```"):
+                    analysis_text = analysis_text[:-3]  # Remove trailing ```
+                analysis_text = analysis_text.strip()
+                
+                # Try to extract JSON from the beginning (in case there's markdown after)
+                # Find the first { and match until the closing }
+                brace_count = 0
+                json_start = -1
+                json_end = -1
+                for i, char in enumerate(analysis_text):
+                    if char == '{':
+                        if json_start == -1:
+                            json_start = i
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0 and json_start != -1:
+                            json_end = i
+                            break
+                
+                if json_start != -1 and json_end != -1:
+                    json_str = analysis_text[json_start:json_end + 1]
+                    analysis_json = json.loads(json_str)
+                else:
+                    # Fallback: try parsing the whole thing
+                    analysis_json = json.loads(analysis_text)
+                
+                # Try to get score from verdict.score first
+                score = None
+                if "verdict" in analysis_json and "score" in analysis_json["verdict"]:
+                    score = analysis_json["verdict"]["score"]
+                # If not available, calculate from metrics
+                elif "metrics" in analysis_json:
+                    metrics = analysis_json["metrics"]
+                    passed = sum(1 for metric in metrics.values() if isinstance(metric, dict) and metric.get("pass") is True)
+                    total = len([m for m in metrics.values() if isinstance(m, dict) and "pass" in m])
+                    if total > 0:
+                        score = f"{passed}/{total}"
+                if score:
+                    result[analysis.ticker] = score
+                else:
+                    result[analysis.ticker] = None
+            except Exception as e:
+                print(f"Error parsing analysis for {analysis.ticker}: {e}")
+                import traceback
+                traceback.print_exc()
                 result[analysis.ticker] = None
-        except Exception as e:
-            print(f"Error parsing analysis for {analysis.ticker}: {e}")
-            import traceback
-            traceback.print_exc()
-            result[analysis.ticker] = None
-    
-    # Include all requested tickers (set to null if no analysis found)
-    for ticker in ticker_list:
-        if ticker not in result:
-            result[ticker] = None
-    
-    # Debug: print result before returning
-    print(f"DEBUG: Returning scores for {ticker_list}: {result}")
-    
-    # Always return a dict, never None
-    return result if result else {}
+        
+        # Include all requested tickers (set to null if no analysis found)
+        for ticker in ticker_list:
+            if ticker not in result:
+                result[ticker] = None
+        
+        # Debug: print result before returning
+        print(f"DEBUG: Returning scores for {ticker_list}: {result}")
+        
+        # Always return a dict, never None
+        return result if result else {}
+    except Exception as e:
+        import traceback
+        error_detail = f"Error getting business scores: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=error_detail)
 
 @app.post("/api/good_business")
 def save_good_business_analysis(data: GoodBusinessCreate, db: Session = Depends(get_db)):
@@ -820,21 +858,27 @@ def save_good_business_analysis(data: GoodBusinessCreate, db: Session = Depends(
 @app.get("/api/scanner/results")
 def get_scanner_results(db: Session = Depends(get_db)):
     """Get all scanner results"""
-    results = db.query(models.ScannerResult).all()
-    scanner_results = []
-    for result in results:
-        try:
-            signals = json.loads(result.signals) if result.signals else []
-            scanner_results.append({
-                "ticker": result.ticker,
-                "signals": signals,
-                "price": result.price,
-                "timestamp": result.timestamp,
-                "discoveredAt": result.discovered_at
-            })
-        except json.JSONDecodeError:
-            continue
-    return scanner_results
+    try:
+        results = db.query(models.ScannerResult).all()
+        scanner_results = []
+        for result in results:
+            try:
+                signals = json.loads(result.signals) if result.signals else []
+                scanner_results.append({
+                    "ticker": result.ticker,
+                    "signals": signals,
+                    "price": result.price,
+                    "timestamp": result.timestamp,
+                    "discoveredAt": result.discovered_at
+                })
+            except json.JSONDecodeError:
+                continue
+        return scanner_results
+    except Exception as e:
+        import traceback
+        error_detail = f"Error getting scanner results: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=error_detail)
 
 @app.post("/api/scanner/results")
 def save_scanner_results(alerts: List[dict], db: Session = Depends(get_db)):

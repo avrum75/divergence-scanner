@@ -95,8 +95,10 @@ export const calculateMACD = (closePrices: number[], fast: number = 12, slow: nu
 
 /**
  * Finds local peaks and valleys
+ * Uses strict comparison for price data, but tolerant comparison for indicators
+ * (RSI/MACD often have flat zones where adjacent values are nearly equal)
  */
-const findPivots = (values: number[], type: 'high' | 'low', range: number = 5): number[] => {
+const findPivots = (values: number[], type: 'high' | 'low', range: number = 5, tolerance: number = 0): number[] => {
   const pivots: number[] = [];
   // Ensure we have enough data and respect the range check
   for (let i = range; i < values.length - range; i++) {
@@ -105,13 +107,19 @@ const findPivots = (values: number[], type: 'high' | 'low', range: number = 5): 
 
     let isPivot = true;
     for (let j = 1; j <= range; j++) {
+      const leftVal = values[i - j];
+      const rightVal = values[i + j];
+      if (isNaN(leftVal) || isNaN(rightVal)) { isPivot = false; break; }
+
       if (type === 'high') {
-        if (values[i - j] > val || values[i + j] >= val) { // Strict inequality on left, weak on right to handle flats slightly
+        // For highs: val must be >= all neighbors (with tolerance)
+        if (leftVal > val + tolerance || rightVal > val + tolerance) {
           isPivot = false;
           break;
         }
       } else {
-        if (values[i - j] < val || values[i + j] <= val) {
+        // For lows: val must be <= all neighbors (with tolerance)
+        if (leftVal < val - tolerance || rightVal < val - tolerance) {
           isPivot = false;
           break;
         }
@@ -119,53 +127,130 @@ const findPivots = (values: number[], type: 'high' | 'low', range: number = 5): 
     }
     if (isPivot) pivots.push(i);
   }
-  return pivots;
+
+  // De-duplicate pivots that are part of the same flat region:
+  // If two pivots are within `range` bars of each other, keep only the most extreme one
+  const deduped: number[] = [];
+  for (let k = 0; k < pivots.length; k++) {
+    if (deduped.length === 0) {
+      deduped.push(pivots[k]);
+      continue;
+    }
+    const lastIdx = deduped[deduped.length - 1];
+    if (pivots[k] - lastIdx <= range) {
+      // Same cluster — keep the more extreme pivot
+      if (type === 'high') {
+        if (values[pivots[k]] > values[lastIdx]) {
+          deduped[deduped.length - 1] = pivots[k];
+        }
+      } else {
+        if (values[pivots[k]] < values[lastIdx]) {
+          deduped[deduped.length - 1] = pivots[k];
+        }
+      }
+    } else {
+      deduped.push(pivots[k]);
+    }
+  }
+  return deduped;
 };
 
 /**
- * SCANS for Divergences
- * Logic:
- * Bullish: Price LL (Lower Low) + Indicator HL (Higher Low)
- * Bearish: Price HH (Higher High) + Indicator LH (Lower High)
- */
-/**
  * SCANS for Divergences (Regular and Hidden)
+ *
+ * Regular Divergence (Reversal signals):
+ *   Bullish: Price makes Lower Low  + Indicator makes Higher Low
+ *   Bearish: Price makes Higher High + Indicator makes Lower High
+ *
+ * Hidden Divergence (Continuation signals):
+ *   Bullish Hidden: Price makes Higher Low  + Indicator makes Lower Low  (uptrend continues)
+ *   Bearish Hidden: Price makes Lower High  + Indicator makes Higher High (downtrend continues)
+ *
+ * Returns ALL valid signals found (not just one), so the caller can see
+ * both bullish and bearish signals on the same timeframe.
  */
 export const scanForDivergences = (
   candles: IndicatorData[],
   indicatorType: IndicatorType,
   sensitivity: number = 3 // 3 = FAST, 5 = SLOW
-): any | null => {
+): any[] => {
 
-  if (candles.length < 50) return null;
+  if (candles.length < 50) return [];
 
   const closes = candles.map(c => c.close);
-  const lookback = 120; // Slightly larger lookback for multi-pivots
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const volumes = candles.map(c => c.volume);
+  const lookback = 120;
+
+  // Use actual highs/lows for price pivots (not closes)
+  const recentHighs = highs.slice(-lookback);
+  const recentLows = lows.slice(-lookback);
   const recentCloses = closes.slice(-lookback);
+  const recentVolumes = volumes.slice(-lookback);
+
+  // RSI values for zone awareness (always needed regardless of indicatorType)
+  const rsiValues = candles.map(c => c.rsi || 0).slice(-lookback);
 
   let indicatorValues: number[] = [];
   if (indicatorType === IndicatorType.RSI) {
-    indicatorValues = candles.map(c => c.rsi || 0).slice(-lookback);
+    indicatorValues = rsiValues;
   } else {
     indicatorValues = candles.map(c => c.macdHist || 0).slice(-lookback);
   }
 
-  const findSignals = (type: 'bullish' | 'bearish') => {
+  // Pre-compute macro trend (shared across bullish/bearish)
+  const macroTrendWindow = 50;
+  const macroTrendEma = calculateEMA(closes, macroTrendWindow);
+  const currentPrice = closes[closes.length - 1];
+  const currentEma = macroTrendEma[macroTrendEma.length - 1];
+  const isUpTrend = currentPrice > currentEma;
+
+  // Minimum pivot spacing: pivots closer than this are likely the same swing
+  // Reduced from sensitivity*2 to sensitivity+1 to avoid over-filtering
+  const MIN_PIVOT_SPACING = Math.max(sensitivity + 1, 4);
+
+  const findSignals = (type: 'bullish' | 'bearish'): any | null => {
     const isBullish = type === 'bullish';
-    const pricePivots = findPivots(recentCloses, isBullish ? 'low' : 'high', sensitivity);
-    const indPivots = findPivots(indicatorValues, isBullish ? 'low' : 'high', sensitivity);
+
+    // Use lows for bullish pivots, highs for bearish pivots
+    const priceData = isBullish ? recentLows : recentHighs;
+    // Price pivots: strict (tolerance=0) — price must be a clear local extreme
+    const pricePivots = findPivots(priceData, isBullish ? 'low' : 'high', sensitivity, 0);
+    // Indicator pivots: tolerant — RSI/MACD often have flat zones
+    // RSI tolerance ~0.5 points, MACD histogram tolerance ~0.01
+    const indTolerance = indicatorType === IndicatorType.RSI ? 0.5 : 0.01;
+    const indPivots = findPivots(indicatorValues, isBullish ? 'low' : 'high', sensitivity, indTolerance);
 
     if (pricePivots.length < 2 || indPivots.length < 2) return null;
 
-    // Use the last 3 pivots if available for Triple Divergence detection
-    const pIndices = pricePivots.slice(-3);
-    const iIndices = indPivots.slice(-3);
+    // Take more pivots for matching (5 instead of 3) to increase matching success
+    const pIndices = pricePivots.slice(-5);
+    const iIndices = indPivots.slice(-5);
 
-    // Check pivots for matching pairs (price pivot near indicator pivot)
+    // Match price pivots to nearest indicator pivot (closest match, no duplicates)
+    // Use a wider window for matching: allow indicator pivots within sensitivity+5 bars
+    // (indicator pivots often lag or lead price pivots by several bars)
+    const matchWindow = sensitivity + 5;
+    const usedIndicatorPivots = new Set<number>();
     const matchedPairs: { p: number, i: number }[] = [];
+
     for (const p of pIndices) {
-      const match = iIndices.find(idx => Math.abs(idx - p) <= 4);
-      if (match !== undefined) matchedPairs.push({ p, i: match });
+      let bestMatch: number | null = null;
+      let bestDist = Infinity;
+
+      for (const idx of iIndices) {
+        const dist = Math.abs(idx - p);
+        if (dist <= matchWindow && dist < bestDist && !usedIndicatorPivots.has(idx)) {
+          bestDist = dist;
+          bestMatch = idx;
+        }
+      }
+
+      if (bestMatch !== null) {
+        usedIndicatorPivots.add(bestMatch);
+        matchedPairs.push({ p, i: bestMatch });
+      }
     }
 
     if (matchedPairs.length < 2) return null;
@@ -174,72 +259,191 @@ export const scanForDivergences = (
     const prev = matchedPairs[matchedPairs.length - 2];
     const triple = matchedPairs.length >= 3 ? matchedPairs[matchedPairs.length - 3] : null;
 
+    // --- IMPROVEMENT 5: Minimum pivot spacing ---
+    // Pivots too close together are noise, not real swings
+    const pivotSpacing = Math.abs(last.p - prev.p);
+    if (pivotSpacing < MIN_PIVOT_SPACING) return null;
+
+    // --- IMPROVEMENT 8: Price structure validation ---
+    // Between the two pivots, price should move in the expected direction
+    // (i.e., there should be a visible swing between the two pivot points).
+    // Only reject truly flat/noisy structures with wide spacing.
+    if (pivotSpacing > 15) {
+      const sliceBetween = recentCloses.slice(
+        Math.min(prev.p, last.p),
+        Math.max(prev.p, last.p) + 1
+      );
+      if (sliceBetween.length > 4) {
+        // Check if there's any meaningful price movement between pivots
+        // by looking at the range vs the average price
+        const maxP = Math.max(...sliceBetween);
+        const minP = Math.min(...sliceBetween);
+        const avgP = (maxP + minP) / 2;
+        const rangeRatio = avgP > 0 ? (maxP - minP) / avgP : 0;
+        // Reject if price barely moves (< 0.2% range) over a wide span
+        if (rangeRatio < 0.002) return null;
+      }
+    }
+
     // REGULAR DIVERGENCE (Reversal)
-    // Bullish: Price LL, Indicator HL
-    // Bearish: Price HH, Indicator LH
     const isRegular = isBullish
-      ? (recentCloses[last.p] < recentCloses[prev.p] && indicatorValues[last.i] > indicatorValues[prev.i])
-      : (recentCloses[last.p] > recentCloses[prev.p] && indicatorValues[last.i] < indicatorValues[prev.i]);
+      ? (priceData[last.p] < priceData[prev.p] && indicatorValues[last.i] > indicatorValues[prev.i])
+      : (priceData[last.p] > priceData[prev.p] && indicatorValues[last.i] < indicatorValues[prev.i]);
 
     // HIDDEN DIVERGENCE (Trend Continuation)
     const isHidden = isBullish
-      ? (recentCloses[last.p] > recentCloses[prev.p] && indicatorValues[last.i] < indicatorValues[prev.i])
-      : (recentCloses[last.p] < recentCloses[prev.p] && indicatorValues[last.i] > indicatorValues[prev.i]);
+      ? (priceData[last.p] > priceData[prev.p] && indicatorValues[last.i] < indicatorValues[prev.i])
+      : (priceData[last.p] < priceData[prev.p] && indicatorValues[last.i] > indicatorValues[prev.i]);
 
     if (!isRegular && !isHidden) return null;
 
-    // FRESHNESS CHECK (Max Age)
-    // last.p is index in recentCloses (length 120)
-    const lastPivotAge = (recentCloses.length - 1) - last.p;
+    // FRESHNESS CHECK
+    const lastPivotAge = (priceData.length - 1) - last.p;
     const isStale = lastPivotAge > 10;
 
-    // TREND DETECTION (Macro)
-    // Simply compare current price vs EMA or a longer window SMA
-    const macroTrendWindow = 50;
-    const macroTrendSma = calculateEMA(closes, macroTrendWindow);
-    const currentPrice = closes[closes.length - 1];
-    const currentSma = macroTrendSma[macroTrendSma.length - 1];
-    const isUpTrend = currentPrice > currentSma;
-
-    // Signal is trend aligned if:
-    // Bullish Hidden: Uptrend (Continuation)
-    // Bullish Regular: Downtrend (Potential Reversal) - wait, or just "Counter trend"
-    // For simplicity:
-    // Hidden signals MUST be trend-aligned.
-    // Regular signals are often counter-trend (reversals).
+    // TREND ALIGNMENT
     const isTrendAligned = isHidden
       ? (isBullish ? isUpTrend : !isUpTrend)
-      : true; // Regular divergences are reversals, so they don't have to be trend-aligned in the same way
+      : true;
 
-    // Strength Calculation (0-100)
-    // Based on the "width" of the divergence and divergence of slopes
-    const priceDelta = Math.abs(recentCloses[last.p] - recentCloses[prev.p]) / recentCloses[prev.p];
+    // Reject hidden divergences against the macro trend
+    if (isHidden && !isTrendAligned) return null;
+
+    // Minimum divergence magnitude filter
+    // Both price and indicator must show at least a minimal difference
+    const priceDelta = Math.abs(priceData[last.p] - priceData[prev.p]) / Math.max(priceData[prev.p], 0.0001);
     const indDelta = Math.abs(indicatorValues[last.i] - indicatorValues[prev.i]);
-    const timeDelta = last.p - prev.p;
+    const minPriceDelta = 0.001; // 0.1% (reduced from 0.3% — too aggressive for range-bound stocks)
+    const minIndDelta = indicatorType === IndicatorType.RSI ? 1.5 : 0.005;
+    if (priceDelta < minPriceDelta && indDelta < minIndDelta) return null; // Use AND: reject only if BOTH are tiny
 
-    let strength = 50; // Base strength
-    strength += Math.min(priceDelta * 1000, 20); // More price movement = stronger
-    strength += Math.min(indDelta / (indicatorType === IndicatorType.RSI ? 0.5 : 0.05), 20);
-    // Penalty for long duration (too wide = less punchy)
-    if (timeDelta > 50) strength -= 10;
-    // Bonus for freshness
-    if (lastPivotAge < 3) strength += 10;
+    // --- IMPROVEMENT 7: Revamped strength formula (0-100) ---
+    //
+    // Design goal: A "textbook" divergence (clear price delta, clear indicator delta,
+    // good spacing, fresh, in an extreme RSI zone) should score ~65-75 on its own.
+    // Confluence/confirmed bonuses in scanMarket can then push it to 80-100.
+    //
+    // Components (total possible = 100):
+    //   Price magnitude:    0-20
+    //   Indicator magnitude: 0-20
+    //   Pivot spacing:      5-15
+    //   Freshness:          0-15
+    //   RSI zone:           0-15
+    //   Volume:             0-10
+    //   Trend alignment:    0-5
+    //
+    let strength = 0;
+
+    // Component 1: Price divergence magnitude (0-20)
+    // Use log scale: 1% → ~10, 3% → ~15, 10% → ~20
+    const priceScore = Math.min(Math.log10(1 + priceDelta * 100) * 12, 20);
+    strength += priceScore;
+
+    // Component 2: Indicator divergence magnitude (0-20)
+    let indScore = 0;
+    if (indicatorType === IndicatorType.RSI) {
+      // RSI: 3 points = 6, 5 pts = 10, 10 pts = 20
+      indScore = Math.min(indDelta * 2, 20);
+    } else {
+      // MACD histogram: scale relative to recent range
+      const absHist = indicatorValues.filter(v => !isNaN(v)).map(Math.abs);
+      const histRange = Math.max(...absHist) - Math.min(...absHist);
+      indScore = histRange > 0 ? Math.min((indDelta / histRange) * 40, 20) : 10;
+    }
+    strength += indScore;
+
+    // Component 3: Pivot spacing quality (5-15)
+    // Everything gets at least 5. Sweet spot 8-40 bars gets full 15.
+    const timeDelta = pivotSpacing;
+    if (timeDelta >= 8 && timeDelta <= 40) {
+      strength += 15; // Ideal spacing
+    } else if (timeDelta >= 4 && timeDelta <= 60) {
+      strength += 10; // Acceptable
+    } else {
+      strength += 5;  // Marginal
+    }
+
+    // Component 4: Freshness bonus (0-15)
+    // More generous — most valid divergences are relatively recent
+    if (lastPivotAge <= 3) strength += 15;
+    else if (lastPivotAge <= 6) strength += 10;
+    else if (lastPivotAge <= 10) strength += 5;
+    // Stale signals get 0 freshness bonus
+
+    // --- IMPROVEMENT 6: RSI zone awareness (0-15) ---
+    const lastRsi = rsiValues[last.p];
+    if (indicatorType === IndicatorType.RSI) {
+      if (isBullish && lastRsi < 30) strength += 15;       // Classic oversold bullish
+      else if (isBullish && lastRsi < 40) strength += 10;  // Near oversold
+      else if (isBullish && lastRsi < 50) strength += 3;   // Moderate
+      else if (!isBullish && lastRsi > 70) strength += 15;  // Classic overbought bearish
+      else if (!isBullish && lastRsi > 60) strength += 10;  // Near overbought
+      else if (!isBullish && lastRsi > 50) strength += 3;   // Moderate
+    } else {
+      // For MACD, give RSI zone bonus if RSI data is available and extreme
+      if (isBullish && lastRsi < 35) strength += 12;
+      else if (isBullish && lastRsi < 45) strength += 5;
+      else if (!isBullish && lastRsi > 65) strength += 12;
+      else if (!isBullish && lastRsi > 55) strength += 5;
+    }
+
+    // --- IMPROVEMENT 2: Volume confirmation (0-10) ---
+    // Check if volume is declining on the second push (confirming exhaustion)
+    const prevPivotIdx = prev.p;
+    const lastPivotIdx = last.p;
+    const volWindowSize = Math.min(3, Math.floor(pivotSpacing / 3));
+    if (volWindowSize > 0) {
+      const getAvgVolume = (idx: number) => {
+        const start = Math.max(0, idx - volWindowSize);
+        const end = Math.min(recentVolumes.length - 1, idx + volWindowSize);
+        const slice = recentVolumes.slice(start, end + 1);
+        return slice.reduce((a, b) => a + b, 0) / slice.length;
+      };
+
+      const prevVol = getAvgVolume(prevPivotIdx);
+      const lastVol = getAvgVolume(lastPivotIdx);
+
+      if (prevVol > 0 && lastVol > 0) {
+        const volRatio = lastVol / prevVol;
+        if (isBullish && isRegular) {
+          if (volRatio < 0.7) strength += 10;
+          else if (volRatio < 0.9) strength += 5;
+        } else if (!isBullish && isRegular) {
+          if (volRatio < 0.7) strength += 10;
+          else if (volRatio < 0.9) strength += 5;
+        } else if (isHidden) {
+          if (volRatio > 1.2) strength += 8;
+          else if (volRatio > 1.0) strength += 3;
+        }
+      }
+    }
+
+    // Trend alignment bonus for regular divergences (0-5)
+    if (isRegular) {
+      const isCounterTrend = isBullish ? !isUpTrend : isUpTrend;
+      if (isCounterTrend) strength += 5;
+    }
 
     strength = Math.max(10, Math.min(strength, 100));
 
     // Multi-pivot (Triple) check
     let isTriple = false;
     if (triple) {
-      if (isRegular) {
-        isTriple = isBullish
-          ? (recentCloses[prev.p] < recentCloses[triple.p] && indicatorValues[prev.i] > indicatorValues[triple.i])
-          : (recentCloses[prev.p] > recentCloses[triple.p] && indicatorValues[prev.i] < indicatorValues[triple.i]);
-      } else {
-        isTriple = isBullish
-          ? (recentCloses[prev.p] > recentCloses[triple.p] && indicatorValues[prev.i] < indicatorValues[triple.i])
-          : (recentCloses[prev.p] < recentCloses[triple.p] && indicatorValues[prev.i] > indicatorValues[triple.i]);
+      // Also check spacing for triple
+      const tripleSpacing = Math.abs(prev.p - triple.p);
+      if (tripleSpacing >= MIN_PIVOT_SPACING) {
+        if (isRegular) {
+          isTriple = isBullish
+            ? (priceData[prev.p] < priceData[triple.p] && indicatorValues[prev.i] > indicatorValues[triple.i])
+            : (priceData[prev.p] > priceData[triple.p] && indicatorValues[prev.i] < indicatorValues[triple.i]);
+        } else {
+          isTriple = isBullish
+            ? (priceData[prev.p] > priceData[triple.p] && indicatorValues[prev.i] < indicatorValues[triple.i])
+            : (priceData[prev.p] < priceData[triple.p] && indicatorValues[prev.i] > indicatorValues[triple.i]);
+        }
       }
     }
+    if (isTriple) strength = Math.min(strength + 10, 100); // Triple bonus
 
     const signalType = isBullish
       ? (isHidden ? SignalType.BULLISH_HIDDEN : SignalType.BULLISH_DIVERGENCE)
@@ -256,5 +460,11 @@ export const scanForDivergences = (
     };
   };
 
-  return findSignals('bullish') || findSignals('bearish');
+  // --- IMPROVEMENT 3: Return ALL valid signals ---
+  const signals: any[] = [];
+  const bullish = findSignals('bullish');
+  const bearish = findSignals('bearish');
+  if (bullish) signals.push(bullish);
+  if (bearish) signals.push(bearish);
+  return signals;
 };

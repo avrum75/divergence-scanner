@@ -4,7 +4,7 @@ import PortfolioPanel from './components/PortfolioPanel';
 import TickerManagementPanel from './components/TickerManagementPanel';
 import ChartGrid from './components/ChartGrid';
 import DocumentationModal from './components/DocumentationModal';
-import { scanMarket, fetchTickerData, getCachedTickerData, subscribeToSyncs, fetchHistorical1DData } from './services/dataService';
+import { scanMarket, fetchTickerData, getCachedTickerData, subscribeToSyncs, fetchHistorical1DData, backgroundSyncWatchlist, Priority } from './services/dataService';
 import { api } from './services/api';
 import { Alert, TickerData, Trade, Timeframe, ConsolidatedAlert } from './types';
 import { TICKERS as INITIAL_TICKERS } from './constants';
@@ -30,9 +30,14 @@ function App() {
     return saved ? new Set(JSON.parse(saved)) : new Set<string>();
   };
   const lastScanTime = React.useRef<number | null>(getInitialLastScanTime());
+  const [lastScanTimeState, setLastScanTimeState] = useState<number | null>(getInitialLastScanTime());
   const scannedTickers = React.useRef<Set<string>>(getInitialScannedTickers());
   const isInitialMount = React.useRef(true);
   const initialDataLoaded = React.useRef(false);
+  const scanningRef = React.useRef(false);
+  const scanSensitivityRef = React.useRef(
+    parseInt(localStorage.getItem('scannerSensitivity') || '3', 10)
+  );
   const [scannedStockRatings, setScannedStockRatings] = useState<Record<string, number>>({});
   const [scannedStockNotes, setScannedStockNotes] = useState<Record<string, { note: string; date: string }[]>>({});
   const [businessScores, setBusinessScores] = useState<Record<string, string>>({}); // ticker -> score (e.g., "6/7")
@@ -95,11 +100,17 @@ function App() {
   const handleScan = useCallback(async (autoSelect: boolean = false, overrideTimeframes?: Timeframe[], tickersToScan?: string[]) => {
     const currentScanId = ++lastScanId.current;
     setScanning(true);
+    scanningRef.current = true;
     const tfsToUse = overrideTimeframes || enabledTimeframes;
     const tickers = tickersToScan || trackedTickers;
     
     try {
-      const results = await scanMarket(tickers);
+      // Ensure data freshness before scanning (only syncs if stale)
+      console.log("🔄 Ensuring data freshness before scan...");
+      await backgroundSyncWatchlist(tickers, Priority.HIGH);
+      
+      // Now scan with fresh data
+      const results = await scanMarket(tickers, scanSensitivity);
       if (currentScanId === lastScanId.current) {
         // Merge results with existing alerts (remove old alerts for scanned tickers, add new ones)
         setAlerts(prev => {
@@ -128,6 +139,7 @@ function App() {
         // Update scanned tickers tracking
         tickers.forEach(ticker => scannedTickers.current.add(ticker));
         lastScanTime.current = Date.now();
+        setLastScanTimeState(Date.now());
         localStorage.setItem('lastScanTime', lastScanTime.current.toString());
         localStorage.setItem('scannedTickers', JSON.stringify(Array.from(scannedTickers.current)));
         
@@ -141,6 +153,7 @@ function App() {
     } finally {
       if (currentScanId === lastScanId.current) {
         setScanning(false);
+        scanningRef.current = false;
       }
 
       // REMOVED: Background refresh that was causing excessive API calls
@@ -227,6 +240,7 @@ function App() {
             if (mostRecent) {
               const resultTime = new Date(mostRecent.discoveredAt || mostRecent.timestamp).getTime();
               lastScanTime.current = resultTime;
+              setLastScanTimeState(resultTime);
               localStorage.setItem('lastScanTime', lastScanTime.current.toString());
             }
           }
@@ -366,6 +380,57 @@ function App() {
     }
   }, [trackedTickers]);
 
+  // Background data sync - runs every 30 minutes to keep data fresh, then re-scans
+  useEffect(() => {
+    if (trackedTickers.length === 0) return;
+
+    const SYNC_INTERVAL = 30 * 60 * 1000; // 30 minutes
+
+    const doBackgroundRefresh = async () => {
+      try {
+        await backgroundSyncWatchlist(trackedTickers, Priority.LOW);
+
+        // Re-scan after sync to update alerts (only if user isn't actively scanning)
+        if (!scanningRef.current) {
+          console.log("🔄 Background re-scan after sync...");
+          const results = await scanMarket(trackedTickers, scanSensitivityRef.current);
+          setAlerts(results);
+
+          api.saveScannerResults(results).catch(e => {
+            console.error("Failed to save background scan results:", e);
+          });
+
+          lastScanTime.current = Date.now();
+          setLastScanTimeState(Date.now());
+          localStorage.setItem('lastScanTime', lastScanTime.current.toString());
+
+          // Update business scores
+          if (trackedTickers.length > 0) {
+            api.getBusinessScores(trackedTickers).then(scores => {
+              setBusinessScores(prev => ({ ...prev, ...scores }));
+            }).catch(() => {});
+          }
+
+          console.log(`✅ Background re-scan completed with ${results.length} alerts`);
+        }
+      } catch (e) {
+        console.error("Background sync/scan failed:", e);
+      }
+    };
+
+    // Initial background sync after 5 minutes (give app time to settle and avoid
+    // overlapping with any manual scan the user might trigger on load)
+    const initialTimeout = setTimeout(doBackgroundRefresh, 5 * 60 * 1000);
+
+    // Then sync every 30 minutes
+    const interval = setInterval(doBackgroundRefresh, SYNC_INTERVAL);
+
+    return () => {
+      clearTimeout(initialTimeout);
+      clearInterval(interval);
+    };
+  }, [trackedTickers]);
+
   const handleSelectTicker = async (ticker: string, force: boolean = false) => {
     setSelectedTicker(ticker);
     setLoadingData(true);
@@ -386,16 +451,26 @@ function App() {
             setTickerData(freshData);
             
             // After initial load, gracefully fetch 12 months of historical 1D data
-            fetchHistorical1DData(ticker, 'HIGH').then(() => {
-              // Refresh data after historical load completes
-              if (current === ticker) {
-                getCachedTickerData(ticker).then(updatedData => {
-                  setTickerData(updatedData);
+            // Only if we don't already have substantial data
+            const d1Data = freshData.data[Timeframe.D1];
+            if (d1Data && d1Data.length > 0) {
+              const oldestBarTime = new Date(d1Data[0].time).getTime();
+              const twelveMonthsAgo = Date.now() - (365 * 24 * 60 * 60 * 1000);
+              const hasSubstantialData = oldestBarTime <= twelveMonthsAgo;
+              
+              if (!hasSubstantialData) {
+                fetchHistorical1DData(ticker, 'HIGH').then(() => {
+                  // Refresh data after historical load completes
+                  if (current === ticker) {
+                    getCachedTickerData(ticker).then(updatedData => {
+                      setTickerData(updatedData);
+                    });
+                  }
+                }).catch(e => {
+                  console.error("Failed to load historical 1D data:", e);
                 });
               }
-            }).catch(e => {
-              console.error("Failed to load historical 1D data:", e);
-            });
+            }
           }
           return current;
         });
@@ -482,6 +557,7 @@ function App() {
 
   const handleScanSensitivityChange = (sensitivity: number) => {
     setScanSensitivity(sensitivity);
+    scanSensitivityRef.current = sensitivity;
     localStorage.setItem('scannerSensitivity', sensitivity.toString());
     handleScan(); // Re-scan with new sensitivity
   };
@@ -665,7 +741,7 @@ function App() {
               tickerNotes={scannedStockNotes}
               onNotesChange={handleNotesChange}
               businessScores={businessScores}
-              businessScores={businessScores}
+              lastScanTime={lastScanTimeState}
               filter={filter}
               onFilterChange={handleFilterChange}
               minDivergences={minDivergences}

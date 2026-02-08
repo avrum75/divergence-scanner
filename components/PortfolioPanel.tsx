@@ -7,10 +7,13 @@ interface PortfolioPanelProps {
 }
 
 const PortfolioPanel: React.FC<PortfolioPanelProps> = ({ trades, onSelectTicker }) => {
+  // Safety check: ensure trades is always an array
+  const safeTrades = trades || [];
+  
   // calculate total PnL
-  const totalInvested = trades.reduce((sum, t) => sum + t.amount, 0);
+  const totalInvested = safeTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
   // Simulate current value based on the stored random pnlPercent
-  const totalValue = trades.reduce((sum, t) => sum + (t.amount * (1 + (t.pnlPercent || 0) / 100)), 0);
+  const totalValue = safeTrades.reduce((sum, t) => sum + ((t.amount || 0) * (1 + ((t.pnlPercent || 0) / 100))), 0);
   const totalPnL = totalValue - totalInvested;
 
   return (
@@ -32,30 +35,38 @@ const PortfolioPanel: React.FC<PortfolioPanelProps> = ({ trades, onSelectTicker 
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-2">
-        {trades.length === 0 && (
+        {safeTrades.length === 0 && (
           <div className="text-center text-slate-500 mt-10 px-4">
             <p>No open positions.</p>
             <p className="text-xs mt-2">Open a chart and click "Open Trade" to add positions.</p>
           </div>
         )}
 
-        {trades.map((trade) => {
+        {safeTrades.map((trade, index) => {
+          if (!trade) return null;
+          
           const pnl = trade.pnlPercent || 0;
           const isProfit = pnl >= 0;
+          const tradeId = trade.id || `trade-${index}`;
+          const ticker = trade.ticker || 'N/A';
+          const entryPrice = trade.entryPrice || 0;
+          const amount = trade.amount || 0;
+          const tradeType = trade.type || 'LONG';
+          const timestamp = trade.timestamp || new Date().toISOString();
 
           return (
             <div 
-              key={trade.id}
-              onClick={() => onSelectTicker(trade.ticker)}
+              key={tradeId}
+              onClick={() => ticker !== 'N/A' && onSelectTicker(ticker)}
               className="p-3 bg-slate-800 rounded-lg border border-slate-700 hover:border-slate-600 cursor-pointer group transition-colors"
             >
               <div className="flex justify-between items-start mb-2">
                 <div>
-                  <span className="font-bold text-lg text-white">{trade.ticker}</span>
+                  <span className="font-bold text-lg text-white">{ticker}</span>
                   <span className={`ml-2 text-xs font-bold px-1 py-0.5 rounded ${
-                    trade.type === 'LONG' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'
+                    tradeType === 'LONG' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'
                   }`}>
-                    {trade.type}
+                    {tradeType}
                   </span>
                 </div>
                 <div className={`text-sm font-mono font-bold ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
@@ -64,12 +75,12 @@ const PortfolioPanel: React.FC<PortfolioPanelProps> = ({ trades, onSelectTicker 
               </div>
               
               <div className="grid grid-cols-2 gap-y-1 text-xs text-slate-400">
-                 <span>Entry: <span className="text-slate-200">${trade.entryPrice.toFixed(2)}</span></span>
-                 <span className="text-right">Size: <span className="text-slate-200">${trade.amount.toLocaleString()}</span></span>
+                 <span>Entry: <span className="text-slate-200">${entryPrice.toFixed(2)}</span></span>
+                 <span className="text-right">Size: <span className="text-slate-200">${amount.toLocaleString()}</span></span>
               </div>
               
               <div className="mt-2 text-[10px] text-slate-500 text-right">
-                 {new Date(trade.timestamp).toLocaleString()}
+                 {new Date(timestamp).toLocaleString()}
               </div>
             </div>
           );
