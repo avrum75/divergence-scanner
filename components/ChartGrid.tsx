@@ -100,7 +100,12 @@ const ChartGrid: React.FC<ChartGridProps> = ({ tickerData, loading, onOpenTrade,
   }
 
   if (!tickerData) {
-    return <div className="flex-1 flex items-center justify-center text-slate-500">Select a ticker from the scanner to view charts.</div>;
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3">
+        <h2 className="text-2xl font-bold text-indigo-400">Welcome to TradePulse</h2>
+        <p className="text-slate-500">Select a ticker from the scanner to view charts.</p>
+      </div>
+    );
   }
 
   // Detect if any timeframe is out of sync
