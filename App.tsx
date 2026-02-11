@@ -5,7 +5,27 @@ import TickerManagementPanel from './components/TickerManagementPanel';
 import BacktestPanel from './components/BacktestPanel';
 import ChartGrid from './components/ChartGrid';
 import DocumentationModal from './components/DocumentationModal';
-import { Radar, Eye, Briefcase, FlaskConical } from 'lucide-react';
+// Inline SVG icon components (no external dependency needed)
+const IconRadar = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62A10 10 0 1 0 21.31 8.35"/><path d="M16.24 7.76A6 6 0 1 0 8.23 16.67"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/>
+  </svg>
+);
+const IconEye = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>
+  </svg>
+);
+const IconBriefcase = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/>
+  </svg>
+);
+const IconFlask = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/>
+  </svg>
+);
 import { scanMarket, fetchTickerData, getCachedTickerData, subscribeToSyncs, fetchHistorical1DData, backgroundSyncWatchlist, Priority } from './services/dataService';
 import { api } from './services/api';
 import { Alert, TickerData, Trade, Timeframe, ConsolidatedAlert } from './types';
@@ -710,10 +730,10 @@ function App() {
         {/* Sidebar Tabs */}
         <div className="flex border-b border-slate-800">
           {([
-            { key: 'SCANNER' as SidebarView, icon: Radar, label: 'Scanner' },
-            { key: 'WATCHLIST' as SidebarView, icon: Eye, label: 'Watchlist' },
-            { key: 'PORTFOLIO' as SidebarView, icon: Briefcase, label: 'Portfolio', badge: trades.length || undefined },
-            { key: 'BACKTEST' as SidebarView, icon: FlaskConical, label: 'Backtest' },
+            { key: 'SCANNER' as SidebarView, icon: IconRadar, label: 'Scanner' },
+            { key: 'WATCHLIST' as SidebarView, icon: IconEye, label: 'Watchlist' },
+            { key: 'PORTFOLIO' as SidebarView, icon: IconBriefcase, label: 'Portfolio', badge: trades.length || undefined },
+            { key: 'BACKTEST' as SidebarView, icon: IconFlask, label: 'Backtest' },
           ]).map(({ key, icon: Icon, label, badge }) => (
             <button
               key={key}
