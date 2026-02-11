@@ -5,6 +5,7 @@ import TickerManagementPanel from './components/TickerManagementPanel';
 import BacktestPanel from './components/BacktestPanel';
 import ChartGrid from './components/ChartGrid';
 import DocumentationModal from './components/DocumentationModal';
+import { Radar, Eye, Briefcase, FlaskConical } from 'lucide-react';
 import { scanMarket, fetchTickerData, getCachedTickerData, subscribeToSyncs, fetchHistorical1DData, backgroundSyncWatchlist, Priority } from './services/dataService';
 import { api } from './services/api';
 import { Alert, TickerData, Trade, Timeframe, ConsolidatedAlert } from './types';
@@ -708,30 +709,27 @@ function App() {
 
         {/* Sidebar Tabs */}
         <div className="flex border-b border-slate-800">
-          <button
-            className={`flex-1 py-3 text-[10px] font-bold transition-colors ${sidebarView === 'SCANNER' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-800/50' : 'text-slate-500 hover:text-slate-300'}`}
-            onClick={() => setSidebarView('SCANNER')}
-          >
-            Scanner
-          </button>
-          <button
-            className={`flex-1 py-3 text-[10px] font-bold transition-colors ${sidebarView === 'WATCHLIST' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-800/50' : 'text-slate-500 hover:text-slate-300'}`}
-            onClick={() => setSidebarView('WATCHLIST')}
-          >
-            Watchlist
-          </button>
-          <button
-            className={`flex-1 py-3 text-[10px] font-bold transition-colors ${sidebarView === 'PORTFOLIO' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-800/50' : 'text-slate-500 hover:text-slate-300'}`}
-            onClick={() => setSidebarView('PORTFOLIO')}
-          >
-            Portfolio ({trades.length})
-          </button>
-          <button
-            className={`flex-1 py-3 text-[10px] font-bold transition-colors ${sidebarView === 'BACKTEST' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-800/50' : 'text-slate-500 hover:text-slate-300'}`}
-            onClick={() => setSidebarView('BACKTEST')}
-          >
-            Backtest
-          </button>
+          {([
+            { key: 'SCANNER' as SidebarView, icon: Radar, label: 'Scanner' },
+            { key: 'WATCHLIST' as SidebarView, icon: Eye, label: 'Watchlist' },
+            { key: 'PORTFOLIO' as SidebarView, icon: Briefcase, label: 'Portfolio', badge: trades.length || undefined },
+            { key: 'BACKTEST' as SidebarView, icon: FlaskConical, label: 'Backtest' },
+          ]).map(({ key, icon: Icon, label, badge }) => (
+            <button
+              key={key}
+              className={`flex-1 py-2.5 flex flex-col items-center gap-0.5 transition-colors ${sidebarView === key ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-800/50' : 'text-slate-500 hover:text-slate-300'}`}
+              onClick={() => setSidebarView(key)}
+              title={label}
+            >
+              <div className="relative">
+                <Icon size={16} />
+                {badge !== undefined && (
+                  <span className="absolute -top-1.5 -right-2.5 bg-indigo-500 text-white text-[8px] font-bold rounded-full w-3.5 h-3.5 flex items-center justify-center">{badge}</span>
+                )}
+              </div>
+              <span className="text-[9px] font-medium">{label}</span>
+            </button>
+          ))}
         </div>
 
         {/* Sidebar Content */}
