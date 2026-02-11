@@ -314,7 +314,7 @@ export const scanForDivergences = (
     const priceDelta = Math.abs(priceData[last.p] - priceData[prev.p]) / Math.max(priceData[prev.p], 0.0001);
     const indDelta = Math.abs(indicatorValues[last.i] - indicatorValues[prev.i]);
     const minPriceDelta = 0.001; // 0.1% (reduced from 0.3% — too aggressive for range-bound stocks)
-    const minIndDelta = indicatorType === IndicatorType.RSI ? 1.5 : 0.005;
+    const minIndDelta = indicatorType === IndicatorType.RSI ? 3.0 : 0.005;
     if (priceDelta < minPriceDelta && indDelta < minIndDelta) return null; // Use AND: reject only if BOTH are tiny
 
     // --- IMPROVEMENT 7: Revamped strength formula (0-100) ---
