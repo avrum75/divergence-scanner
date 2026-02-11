@@ -1,0 +1,20 @@
+{
+  "name": "Bullish RSI Divergence",
+  "description": "Detects bullish regular divergence: Price makes Lower Low while RSI makes Higher Low. Targets potential reversals at the bottom of downtrends.",
+  "version": "1.0",
+  "pine_script": "bullish_rsi_divergence.pine",
+  "direction": "LONG",
+  "signal_type": "BULLISH_DIVERGENCE",
+  "indicator": "RSI",
+  "parameters": {
+    "rsi_period": 14,
+    "pivot_lookback": 3,
+    "min_rsi_delta": 3.0,
+    "min_price_delta_pct": 0.1,
+    "take_profit_pct": 3.0,
+    "stop_loss_pct": 2.0,
+    "rsi_zone_max": 40,
+    "min_pivot_spacing": 4,
+    "max_pivot_age": 10
+  }
+}

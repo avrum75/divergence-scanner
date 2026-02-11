@@ -91,10 +91,28 @@ class GoodBusinessAnalysis(Base):
 
 class ScannerResult(Base):
     __tablename__ = "scanner_results"
-    
+
     ticker = Column(String, primary_key=True, index=True)
     signals = Column(Text)  # JSON string of signals array
     price = Column(Float)
     timestamp = Column(String)  # ISO timestamp string
     discovered_at = Column(String, nullable=True)  # ISO timestamp string
     last_updated = Column(DateTime, default=datetime.utcnow)
+
+
+class BacktestResult(Base):
+    __tablename__ = "backtest_results"
+
+    id = Column(Integer, primary_key=True, index=True)
+    strategy_id = Column(String, index=True)          # e.g. "bullish_rsi_divergence"
+    strategy_name = Column(String)                     # Human-readable name
+    ticker = Column(String, index=True)
+    timeframe = Column(String)
+    parameters = Column(Text)                          # JSON string of parameters used
+    metrics = Column(Text)                             # JSON string of result metrics
+    trades = Column(Text)                              # JSON string of trade list
+    signals_found = Column(Integer)
+    bar_count = Column(Integer)
+    date_range_start = Column(String)
+    date_range_end = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)

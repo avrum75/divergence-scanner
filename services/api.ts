@@ -169,4 +169,54 @@ export const api = {
         if (!res.ok) throw new Error('Failed to save scanner results');
         return res.json();
     },
+
+    // Backtesting
+    getStrategies: async () => {
+        const res = await fetch(`${API_URL}/api/strategies`);
+        if (!res.ok) throw new Error('Failed to fetch strategies');
+        return res.json();
+    },
+    getStrategy: async (strategyId: string) => {
+        const res = await fetch(`${API_URL}/api/strategies/${encodeURIComponent(strategyId)}`);
+        if (!res.ok) throw new Error('Failed to fetch strategy');
+        return res.json();
+    },
+    runBacktest: async (strategyId: string, ticker: string, timeframe: string, paramOverrides?: Record<string, any>) => {
+        const res = await fetch(`${API_URL}/api/backtest/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                strategy_id: strategyId,
+                ticker,
+                timeframe,
+                param_overrides: paramOverrides || null,
+            })
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Backtest failed' }));
+            throw new Error(err.detail || 'Backtest failed');
+        }
+        return res.json();
+    },
+    getBacktestResults: async (strategyId?: string, ticker?: string) => {
+        const params = new URLSearchParams();
+        if (strategyId) params.set('strategy_id', strategyId);
+        if (ticker) params.set('ticker', ticker);
+        const qs = params.toString();
+        const res = await fetch(`${API_URL}/api/backtest/results${qs ? '?' + qs : ''}`);
+        if (!res.ok) return [];
+        return res.json();
+    },
+    getBacktestResult: async (resultId: number) => {
+        const res = await fetch(`${API_URL}/api/backtest/results/${resultId}`);
+        if (!res.ok) throw new Error('Failed to fetch backtest result');
+        return res.json();
+    },
+    deleteBacktestResult: async (resultId: number) => {
+        const res = await fetch(`${API_URL}/api/backtest/results/${resultId}`, {
+            method: 'DELETE',
+        });
+        if (!res.ok) throw new Error('Failed to delete backtest result');
+        return res.json();
+    },
 };

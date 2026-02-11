@@ -1,0 +1,104 @@
+// This Pine Script™ is subject to the terms of the Mozilla Public License 2.0
+// © Divergence Scanner - Bullish RSI Divergence Strategy
+//
+// Detects bullish regular divergence: Price makes Lower Low while RSI makes Higher Low
+// Designed to catch potential reversals at the bottom of downtrends.
+//
+// Entry: On detection of bullish RSI divergence
+// Exit:  Take profit or stop loss (configurable percentages)
+
+//@version=6
+strategy("Bullish RSI Divergence", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === INPUTS ===
+rsiPeriod       = input.int(14, "RSI Period", minval=2, maxval=50)
+pivotLookback   = input.int(3, "Pivot Lookback (Sensitivity)", minval=2, maxval=10, tooltip="Lower = more signals (faster), Higher = fewer signals (stricter)")
+minRsiDelta     = input.float(3.0, "Min RSI Delta (points)", minval=0.5, maxval=20, step=0.5, tooltip="Minimum RSI difference between pivot lows to qualify as divergence")
+minPriceDelta   = input.float(0.1, "Min Price Delta (%)", minval=0.01, maxval=5.0, step=0.1, tooltip="Minimum price difference between pivot lows (percentage)")
+takeProfitPct   = input.float(3.0, "Take Profit %", minval=0.5, maxval=50, step=0.5)
+stopLossPct     = input.float(2.0, "Stop Loss %", minval=0.5, maxval=50, step=0.5)
+rsiOversold     = input.int(40, "RSI Zone (max)", minval=20, maxval=60, tooltip="Only trigger when RSI is below this level")
+minPivotSpacing = input.int(4, "Min Pivot Spacing (bars)", minval=2, maxval=30)
+maxPivotAge     = input.int(10, "Max Pivot Age (bars)", minval=3, maxval=50, tooltip="Ignore pivots older than this many bars from current bar")
+
+// === RSI CALCULATION ===
+rsiValue = ta.rsi(close, rsiPeriod)
+
+// === PIVOT DETECTION ===
+// Find pivot lows in price (using candle lows) and RSI
+pricePivotLow = ta.pivotlow(low, pivotLookback, pivotLookback)
+rsiPivotLow   = ta.pivotlow(rsiValue, pivotLookback, pivotLookback)
+
+// Track last two pivot lows for price and RSI
+var float prevPriceLow = na
+var int   prevPriceBar = na
+var float prevRsiLow   = na
+var int   prevRsiBar   = na
+
+var float lastPriceLow = na
+var int   lastPriceBar = na
+var float lastRsiLow   = na
+var int   lastRsiBar   = na
+
+// Update price pivots
+if not na(pricePivotLow)
+    prevPriceLow := lastPriceLow
+    prevPriceBar := lastPriceBar
+    lastPriceLow := pricePivotLow
+    lastPriceBar := bar_index - pivotLookback
+
+// Update RSI pivots
+if not na(rsiPivotLow)
+    prevRsiLow := lastRsiLow
+    prevRsiBar := lastRsiBar
+    lastRsiLow := rsiPivotLow
+    lastRsiBar := bar_index - pivotLookback
+
+// === DIVERGENCE DETECTION ===
+// Bullish Regular: Price Lower Low + RSI Higher Low
+hasTwoPricePivots = not na(prevPriceLow) and not na(lastPriceLow)
+hasTwoRsiPivots   = not na(prevRsiLow) and not na(lastRsiLow)
+
+// Price makes lower low
+priceLowerLow = hasTwoPricePivots and lastPriceLow < prevPriceLow
+// RSI makes higher low
+rsiHigherLow  = hasTwoRsiPivots and lastRsiLow > prevRsiLow
+
+// Magnitude filters
+rsiDelta   = hasTwoRsiPivots ? math.abs(lastRsiLow - prevRsiLow) : 0.0
+priceDelta = hasTwoPricePivots and prevPriceLow > 0 ? math.abs(lastPriceLow - prevPriceLow) / prevPriceLow * 100 : 0.0
+
+// Spacing filter
+pivotSpacing = hasTwoPricePivots ? math.abs(lastPriceBar - prevPriceBar) : 0
+
+// Freshness filter
+pivotAge = bar_index - lastPriceBar
+
+// Zone filter
+inOversoldZone = lastRsiLow < rsiOversold
+
+// Combined signal
+bullishDivergence = priceLowerLow and rsiHigherLow and rsiDelta >= minRsiDelta and priceDelta >= minPriceDelta and pivotSpacing >= minPivotSpacing and pivotAge <= maxPivotAge and inOversoldZone
+
+// === STRATEGY EXECUTION ===
+if bullishDivergence and strategy.position_size == 0
+    strategy.entry("Bull Div", strategy.long)
+
+// Exit on take profit or stop loss
+if strategy.position_size > 0
+    strategy.exit("TP/SL", "Bull Div", profit=close * takeProfitPct / 100 / syminfo.mintick, loss=close * stopLossPct / 100 / syminfo.mintick)
+
+// === PLOTTING ===
+plotshape(bullishDivergence, style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, title="Bullish Divergence")
+
+// Draw divergence lines when detected
+if bullishDivergence
+    // Price line (lower low)
+    line.new(prevPriceBar, prevPriceLow, lastPriceBar, lastPriceLow, color=color.red, width=2, style=line.style_solid)
+    // RSI would be on separate pane - shown via label
+    label.new(bar_index, low, "Bull Div\nRSI: " + str.tostring(lastRsiLow, "#.#") + " > " + str.tostring(prevRsiLow, "#.#"), style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+
+// RSI plot (separate pane)
+plot(rsiValue, "RSI", color=color.new(color.purple, 0), linewidth=1)
+hline(30, "Oversold", color=color.new(color.green, 50), linestyle=hline.style_dashed)
+hline(70, "Overbought", color=color.new(color.red, 50), linestyle=hline.style_dashed)

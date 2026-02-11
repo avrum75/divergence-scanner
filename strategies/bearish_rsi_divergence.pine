@@ -1,0 +1,104 @@
+// This Pine Script™ is subject to the terms of the Mozilla Public License 2.0
+// © Divergence Scanner - Bearish RSI Divergence Strategy
+//
+// Detects bearish regular divergence: Price makes Higher High while RSI makes Lower High
+// Designed to catch potential reversals at the top of uptrends.
+//
+// Entry: On detection of bearish RSI divergence (short)
+// Exit:  Take profit or stop loss (configurable percentages)
+
+//@version=6
+strategy("Bearish RSI Divergence", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === INPUTS ===
+rsiPeriod       = input.int(14, "RSI Period", minval=2, maxval=50)
+pivotLookback   = input.int(3, "Pivot Lookback (Sensitivity)", minval=2, maxval=10, tooltip="Lower = more signals (faster), Higher = fewer signals (stricter)")
+minRsiDelta     = input.float(3.0, "Min RSI Delta (points)", minval=0.5, maxval=20, step=0.5, tooltip="Minimum RSI difference between pivot highs to qualify as divergence")
+minPriceDelta   = input.float(0.1, "Min Price Delta (%)", minval=0.01, maxval=5.0, step=0.1, tooltip="Minimum price difference between pivot highs (percentage)")
+takeProfitPct   = input.float(3.0, "Take Profit %", minval=0.5, maxval=50, step=0.5)
+stopLossPct     = input.float(2.0, "Stop Loss %", minval=0.5, maxval=50, step=0.5)
+rsiOverbought   = input.int(60, "RSI Zone (min)", minval=40, maxval=80, tooltip="Only trigger when RSI is above this level")
+minPivotSpacing = input.int(4, "Min Pivot Spacing (bars)", minval=2, maxval=30)
+maxPivotAge     = input.int(10, "Max Pivot Age (bars)", minval=3, maxval=50, tooltip="Ignore pivots older than this many bars from current bar")
+
+// === RSI CALCULATION ===
+rsiValue = ta.rsi(close, rsiPeriod)
+
+// === PIVOT DETECTION ===
+// Find pivot highs in price (using candle highs) and RSI
+pricePivotHigh = ta.pivothigh(high, pivotLookback, pivotLookback)
+rsiPivotHigh   = ta.pivothigh(rsiValue, pivotLookback, pivotLookback)
+
+// Track last two pivot highs for price and RSI
+var float prevPriceHigh = na
+var int   prevPriceBar  = na
+var float prevRsiHigh   = na
+var int   prevRsiBar    = na
+
+var float lastPriceHigh = na
+var int   lastPriceBar  = na
+var float lastRsiHigh   = na
+var int   lastRsiBar    = na
+
+// Update price pivots
+if not na(pricePivotHigh)
+    prevPriceHigh := lastPriceHigh
+    prevPriceBar  := lastPriceBar
+    lastPriceHigh := pricePivotHigh
+    lastPriceBar  := bar_index - pivotLookback
+
+// Update RSI pivots
+if not na(rsiPivotHigh)
+    prevRsiHigh := lastRsiHigh
+    prevRsiBar  := lastRsiBar
+    lastRsiHigh := rsiPivotHigh
+    lastRsiBar  := bar_index - pivotLookback
+
+// === DIVERGENCE DETECTION ===
+// Bearish Regular: Price Higher High + RSI Lower High
+hasTwoPricePivots = not na(prevPriceHigh) and not na(lastPriceHigh)
+hasTwoRsiPivots   = not na(prevRsiHigh) and not na(lastRsiHigh)
+
+// Price makes higher high
+priceHigherHigh = hasTwoPricePivots and lastPriceHigh > prevPriceHigh
+// RSI makes lower high
+rsiLowerHigh    = hasTwoRsiPivots and lastRsiHigh < prevRsiHigh
+
+// Magnitude filters
+rsiDelta   = hasTwoRsiPivots ? math.abs(lastRsiHigh - prevRsiHigh) : 0.0
+priceDelta = hasTwoPricePivots and prevPriceHigh > 0 ? math.abs(lastPriceHigh - prevPriceHigh) / prevPriceHigh * 100 : 0.0
+
+// Spacing filter
+pivotSpacing = hasTwoPricePivots ? math.abs(lastPriceBar - prevPriceBar) : 0
+
+// Freshness filter
+pivotAge = bar_index - lastPriceBar
+
+// Zone filter
+inOverboughtZone = lastRsiHigh > rsiOverbought
+
+// Combined signal
+bearishDivergence = priceHigherHigh and rsiLowerHigh and rsiDelta >= minRsiDelta and priceDelta >= minPriceDelta and pivotSpacing >= minPivotSpacing and pivotAge <= maxPivotAge and inOverboughtZone
+
+// === STRATEGY EXECUTION ===
+if bearishDivergence and strategy.position_size == 0
+    strategy.entry("Bear Div", strategy.short)
+
+// Exit on take profit or stop loss
+if strategy.position_size > 0
+    strategy.exit("TP/SL", "Bear Div", profit=close * takeProfitPct / 100 / syminfo.mintick, loss=close * stopLossPct / 100 / syminfo.mintick)
+
+// === PLOTTING ===
+plotshape(bearishDivergence, style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, title="Bearish Divergence")
+
+// Draw divergence lines when detected
+if bearishDivergence
+    // Price line (higher high)
+    line.new(prevPriceBar, prevPriceHigh, lastPriceBar, lastPriceHigh, color=color.green, width=2, style=line.style_solid)
+    // Label with RSI info
+    label.new(bar_index, high, "Bear Div\nRSI: " + str.tostring(lastRsiHigh, "#.#") + " < " + str.tostring(prevRsiHigh, "#.#"), style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+
+// RSI plot (separate pane)
+plot(rsiValue, "RSI", color=color.new(color.purple, 0), linewidth=1)
+hline(30, "Oversold", color=color.new(color.green, 50), linestyle=hline.style_dashed)
+hline(70, "Overbought", color=color.new(color.red, 50), linestyle=hline.style_dashed)

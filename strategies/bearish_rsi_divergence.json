@@ -1,0 +1,20 @@
+{
+  "name": "Bearish RSI Divergence",
+  "description": "Detects bearish regular divergence: Price makes Higher High while RSI makes Lower High. Targets potential reversals at the top of uptrends.",
+  "version": "1.0",
+  "pine_script": "bearish_rsi_divergence.pine",
+  "direction": "SHORT",
+  "signal_type": "BEARISH_DIVERGENCE",
+  "indicator": "RSI",
+  "parameters": {
+    "rsi_period": 14,
+    "pivot_lookback": 3,
+    "min_rsi_delta": 3.0,
+    "min_price_delta_pct": 0.1,
+    "take_profit_pct": 3.0,
+    "stop_loss_pct": 2.0,
+    "rsi_zone_min": 60,
+    "min_pivot_spacing": 4,
+    "max_pivot_age": 10
+  }
+}

@@ -904,6 +904,159 @@ def save_scanner_results(alerts: List[dict], db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- Backtesting Endpoints ---
+
+from backtesting.engine import list_strategies, load_strategy, get_pine_script, run_backtest
+
+
+class BacktestRequest(BaseModel):
+    strategy_id: str
+    ticker: str
+    timeframe: str
+    param_overrides: Optional[dict] = None
+
+
+@app.get("/api/strategies")
+def get_strategies():
+    """List all available backtesting strategies."""
+    return list_strategies()
+
+
+@app.get("/api/strategies/{strategy_id}")
+def get_strategy(strategy_id: str):
+    """Get strategy config and Pine Script source."""
+    try:
+        config = load_strategy(strategy_id)
+        pine = get_pine_script(strategy_id)
+        return {
+            "config": config,
+            "pine_script": pine,
+        }
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Strategy '{strategy_id}' not found")
+
+
+@app.post("/api/backtest/run")
+def run_backtest_endpoint(req: BacktestRequest, db: Session = Depends(get_db)):
+    """Run a backtest for a strategy on a specific ticker/timeframe."""
+    try:
+        config = load_strategy(req.strategy_id)
+        config['id'] = req.strategy_id
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Strategy '{req.strategy_id}' not found")
+
+    # Load bars from database
+    bars_query = db.query(models.BarRecord)\
+        .filter(models.BarRecord.ticker == req.ticker, models.BarRecord.timeframe == req.timeframe)\
+        .order_by(models.BarRecord.time.asc())\
+        .all()
+
+    if not bars_query or len(bars_query) < 50:
+        raise HTTPException(status_code=400, detail=f"Not enough data for {req.ticker}/{req.timeframe}. Need at least 50 bars, got {len(bars_query) if bars_query else 0}.")
+
+    bars = [
+        {
+            'time': b.time,
+            'open': b.open,
+            'high': b.high,
+            'low': b.low,
+            'close': b.close,
+            'volume': b.volume,
+            'ticker': b.ticker,
+            'timeframe': b.timeframe,
+        }
+        for b in bars_query
+    ]
+
+    result = run_backtest(bars, config, req.param_overrides)
+    result['ticker'] = req.ticker
+    result['timeframe'] = req.timeframe
+
+    # Save result to database
+    db_result = models.BacktestResult(
+        strategy_id=req.strategy_id,
+        strategy_name=config.get('name', ''),
+        ticker=req.ticker,
+        timeframe=req.timeframe,
+        parameters=json.dumps(result.get('parameters', {})),
+        metrics=json.dumps(result.get('metrics', {})),
+        trades=json.dumps(result.get('trades', [])),
+        signals_found=result.get('signals_found', 0),
+        bar_count=result.get('bar_count', 0),
+        date_range_start=result.get('date_range', {}).get('start', ''),
+        date_range_end=result.get('date_range', {}).get('end', ''),
+    )
+    db.add(db_result)
+    db.commit()
+    db.refresh(db_result)
+    result['id'] = db_result.id
+
+    return result
+
+
+@app.get("/api/backtest/results")
+def get_backtest_results(
+    strategy_id: Optional[str] = None,
+    ticker: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Get saved backtest results, optionally filtered."""
+    query = db.query(models.BacktestResult).order_by(models.BacktestResult.created_at.desc())
+    if strategy_id:
+        query = query.filter(models.BacktestResult.strategy_id == strategy_id)
+    if ticker:
+        query = query.filter(models.BacktestResult.ticker == ticker)
+    results = query.limit(50).all()
+
+    return [
+        {
+            'id': r.id,
+            'strategy_id': r.strategy_id,
+            'strategy_name': r.strategy_name,
+            'ticker': r.ticker,
+            'timeframe': r.timeframe,
+            'parameters': json.loads(r.parameters) if r.parameters else {},
+            'metrics': json.loads(r.metrics) if r.metrics else {},
+            'signals_found': r.signals_found,
+            'bar_count': r.bar_count,
+            'date_range': {'start': r.date_range_start, 'end': r.date_range_end},
+            'created_at': r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in results
+    ]
+
+
+@app.get("/api/backtest/results/{result_id}")
+def get_backtest_result(result_id: int, db: Session = Depends(get_db)):
+    """Get a specific backtest result with full trade list."""
+    r = db.query(models.BacktestResult).filter(models.BacktestResult.id == result_id).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Backtest result not found")
+
+    return {
+        'id': r.id,
+        'strategy_id': r.strategy_id,
+        'strategy_name': r.strategy_name,
+        'ticker': r.ticker,
+        'timeframe': r.timeframe,
+        'parameters': json.loads(r.parameters) if r.parameters else {},
+        'metrics': json.loads(r.metrics) if r.metrics else {},
+        'trades': json.loads(r.trades) if r.trades else [],
+        'signals_found': r.signals_found,
+        'bar_count': r.bar_count,
+        'date_range': {'start': r.date_range_start, 'end': r.date_range_end},
+        'created_at': r.created_at.isoformat() if r.created_at else None,
+    }
+
+
+@app.delete("/api/backtest/results/{result_id}")
+def delete_backtest_result(result_id: int, db: Session = Depends(get_db)):
+    """Delete a specific backtest result."""
+    db.query(models.BacktestResult).filter(models.BacktestResult.id == result_id).delete()
+    db.commit()
+    return {"status": "ok"}
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""

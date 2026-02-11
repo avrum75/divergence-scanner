@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import AlertPanel from './components/AlertPanel';
 import PortfolioPanel from './components/PortfolioPanel';
 import TickerManagementPanel from './components/TickerManagementPanel';
+import BacktestPanel from './components/BacktestPanel';
 import ChartGrid from './components/ChartGrid';
 import DocumentationModal from './components/DocumentationModal';
 import { scanMarket, fetchTickerData, getCachedTickerData, subscribeToSyncs, fetchHistorical1DData, backgroundSyncWatchlist, Priority } from './services/dataService';
@@ -9,7 +10,7 @@ import { api } from './services/api';
 import { Alert, TickerData, Trade, Timeframe, ConsolidatedAlert } from './types';
 import { TICKERS as INITIAL_TICKERS } from './constants';
 
-type SidebarView = 'SCANNER' | 'PORTFOLIO' | 'WATCHLIST';
+type SidebarView = 'SCANNER' | 'PORTFOLIO' | 'WATCHLIST' | 'BACKTEST';
 
 function App() {
   const [alerts, setAlerts] = useState<ConsolidatedAlert[]>([]);
@@ -725,6 +726,12 @@ function App() {
           >
             Portfolio ({trades.length})
           </button>
+          <button
+            className={`flex-1 py-3 text-[10px] font-bold transition-colors ${sidebarView === 'BACKTEST' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-800/50' : 'text-slate-500 hover:text-slate-300'}`}
+            onClick={() => setSidebarView('BACKTEST')}
+          >
+            Backtest
+          </button>
         </div>
 
         {/* Sidebar Content */}
@@ -782,10 +789,15 @@ function App() {
               openTrades={new Set(trades.map(t => t.ticker))}
               syncingTickers={activeSyncingTickers}
             />
-          ) : (
+          ) : sidebarView === 'PORTFOLIO' ? (
             <PortfolioPanel
               trades={trades}
               onSelectTicker={handleSelectTicker}
+            />
+          ) : (
+            <BacktestPanel
+              tickers={trackedTickers}
+              activeTicker={selectedTicker}
             />
           )}
         </div>
