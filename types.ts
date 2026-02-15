@@ -47,6 +47,7 @@ export interface ConsolidatedAlert {
     isConfirmed?: boolean; // RSI+MACD Convergence
     isStale?: boolean; // More than 10 candles old
     isTrendAligned?: boolean; // Aligned with macro trend
+    isMaturing?: boolean; // Pivot detected early, bounce confirmed but not fully mature
   }[];
   price: number;
   timestamp: string;

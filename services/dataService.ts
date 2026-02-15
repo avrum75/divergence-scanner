@@ -793,8 +793,8 @@ export const scanMarket = async (watchlist: string[], sensitivity: number = 3): 
             : sensitivity;                 // D1: use base sensitivity as-is
 
         // scanForDivergences now returns an array of all signals found
-        const rsiDivs = scanForDivergences(data, IndicatorType.RSI, tfSensitivity);
-        const macdDivs = scanForDivergences(data, IndicatorType.MACD, tfSensitivity);
+        const rsiDivs = scanForDivergences(data, IndicatorType.RSI, tfSensitivity, true);
+        const macdDivs = scanForDivergences(data, IndicatorType.MACD, tfSensitivity, true);
 
         rsiSignalsByTf[tf] = rsiDivs;
         macdSignalsByTf[tf] = macdDivs;
@@ -828,7 +828,8 @@ export const scanMarket = async (watchlist: string[], sensitivity: number = 3): 
             isTriple: div.isTriple,
             isConfirmed: confirmed,
             isStale: div.isStale,
-            isTrendAligned: div.isTrendAligned
+            isTrendAligned: div.isTrendAligned,
+            isMaturing: div.isMaturing
           });
         }
 
@@ -845,7 +846,8 @@ export const scanMarket = async (watchlist: string[], sensitivity: number = 3): 
             isTriple: div.isTriple,
             isConfirmed: confirmed,
             isStale: div.isStale,
-            isTrendAligned: div.isTrendAligned
+            isTrendAligned: div.isTrendAligned,
+            isMaturing: div.isMaturing
           });
         }
       };

@@ -98,30 +98,48 @@ export const calculateMACD = (closePrices: number[], fast: number = 12, slow: nu
  * Uses strict comparison for price data, but tolerant comparison for indicators
  * (RSI/MACD often have flat zones where adjacent values are nearly equal)
  */
-const findPivots = (values: number[], type: 'high' | 'low', range: number = 5, tolerance: number = 0): number[] => {
+const findPivots = (values: number[], type: 'high' | 'low', range: number = 5, tolerance: number = 0, earlyDetection: boolean = false): number[] => {
   const pivots: number[] = [];
-  // Ensure we have enough data and respect the range check
-  for (let i = range; i < values.length - range; i++) {
+  // For early detection: allow scanning into the tail region with reduced right-side confirmation.
+  // Full `range` bars required on the left, but only `minRight` bars needed on the right
+  // for bars near the end of the data. This lets us detect pivots sooner.
+  const minRight = earlyDetection ? Math.min(2, range) : range;
+
+  for (let i = range; i < values.length - minRight; i++) {
     const val = values[i];
     if (isNaN(val)) continue;
 
     let isPivot = true;
-    for (let j = 1; j <= range; j++) {
-      const leftVal = values[i - j];
-      const rightVal = values[i + j];
-      if (isNaN(leftVal) || isNaN(rightVal)) { isPivot = false; break; }
+    // How many right-side bars are available (may be less than `range` near the tail)
+    const rightLimit = earlyDetection ? Math.min(range, values.length - 1 - i) : range;
 
-      if (type === 'high') {
-        // For highs: val must be >= all neighbors (with tolerance)
-        if (leftVal > val + tolerance || rightVal > val + tolerance) {
-          isPivot = false;
-          break;
+    for (let j = 1; j <= range; j++) {
+      // Left side: always check full range
+      const leftVal = values[i - j];
+      if (isNaN(leftVal)) { isPivot = false; break; }
+
+      if (j <= rightLimit) {
+        // Right side: check up to available bars
+        const rightVal = values[i + j];
+        if (isNaN(rightVal)) { isPivot = false; break; }
+
+        if (type === 'high') {
+          if (leftVal > val + tolerance || rightVal > val + tolerance) {
+            isPivot = false;
+            break;
+          }
+        } else {
+          if (leftVal < val - tolerance || rightVal < val - tolerance) {
+            isPivot = false;
+            break;
+          }
         }
       } else {
-        // For lows: val must be <= all neighbors (with tolerance)
-        if (leftVal < val - tolerance || rightVal < val - tolerance) {
-          isPivot = false;
-          break;
+        // Beyond available right bars: only check left side
+        if (type === 'high') {
+          if (leftVal > val + tolerance) { isPivot = false; break; }
+        } else {
+          if (leftVal < val - tolerance) { isPivot = false; break; }
         }
       }
     }
@@ -172,7 +190,8 @@ const findPivots = (values: number[], type: 'high' | 'low', range: number = 5, t
 export const scanForDivergences = (
   candles: IndicatorData[],
   indicatorType: IndicatorType,
-  sensitivity: number = 3 // 3 = FAST, 5 = SLOW
+  sensitivity: number = 3, // 3 = FAST, 5 = SLOW
+  earlyDetection: boolean = false // Detect maturing pivots with fewer right-side bars
 ): any[] => {
 
   if (candles.length < 50) return [];
@@ -207,9 +226,9 @@ export const scanForDivergences = (
   const isUpTrend = currentPrice > currentEma;
 
   // Minimum pivot spacing: pivots closer than this are likely the same swing.
-  // Use sensitivity*2 to ensure pivots represent distinct swings, not noise.
-  // With sensitivity=5 (1H), this gives 10 bars minimum = 10 hours between pivots.
-  const MIN_PIVOT_SPACING = Math.max(sensitivity * 2, 6);
+  // Reference charts show good divergences have 15-25 bar spacing.
+  // 1H(s=5)→12, 4H(s=4)→10, D1(s=3)→8 bars minimum between pivots.
+  const MIN_PIVOT_SPACING = Math.max(sensitivity * 2 + 2, 8);
 
   const findSignals = (type: 'bullish' | 'bearish'): any | null => {
     const isBullish = type === 'bullish';
@@ -217,11 +236,11 @@ export const scanForDivergences = (
     // Use lows for bullish pivots, highs for bearish pivots
     const priceData = isBullish ? recentLows : recentHighs;
     // Price pivots: strict (tolerance=0) — price must be a clear local extreme
-    const pricePivots = findPivots(priceData, isBullish ? 'low' : 'high', sensitivity, 0);
+    const pricePivots = findPivots(priceData, isBullish ? 'low' : 'high', sensitivity, 0, earlyDetection);
     // Indicator pivots: tolerant — RSI/MACD often have flat zones
     // RSI tolerance ~0.5 points, MACD histogram tolerance ~0.01
     const indTolerance = indicatorType === IndicatorType.RSI ? 0.5 : 0.01;
-    const indPivots = findPivots(indicatorValues, isBullish ? 'low' : 'high', sensitivity, indTolerance);
+    const indPivots = findPivots(indicatorValues, isBullish ? 'low' : 'high', sensitivity, indTolerance, earlyDetection);
 
     if (pricePivots.length < 2 || indPivots.length < 2) return null;
 
@@ -259,6 +278,31 @@ export const scanForDivergences = (
     const last = matchedPairs[matchedPairs.length - 1];
     const prev = matchedPairs[matchedPairs.length - 2];
     const triple = matchedPairs.length >= 3 ? matchedPairs[matchedPairs.length - 3] : null;
+
+    // --- Early Detection: determine if last pivot is maturing ---
+    const dataLength = priceData.length;
+    const lastPivotDistFromEnd = (dataLength - 1) - last.p;
+    const isInEarlyZone = earlyDetection && lastPivotDistFromEnd < sensitivity;
+    let isMaturing = false;
+
+    if (isInEarlyZone) {
+      // Bounce validation: confirm price has moved meaningfully away from the pivot.
+      // Without this, a flat tail or continued decline could trigger false early pivots.
+      const currentClose = recentCloses[recentCloses.length - 1];
+      const pivotPrice = priceData[last.p];
+
+      if (isBullish) {
+        // For bullish (low pivot): close must be at least 0.3% above the pivot low
+        const bouncePercent = (currentClose - pivotPrice) / pivotPrice;
+        if (bouncePercent < 0.003) return null;
+      } else {
+        // For bearish (high pivot): close must be at least 0.3% below the pivot high
+        const bouncePercent = (pivotPrice - currentClose) / pivotPrice;
+        if (bouncePercent < 0.003) return null;
+      }
+
+      isMaturing = true;
+    }
 
     // --- IMPROVEMENT 5: Minimum pivot spacing ---
     // Pivots too close together are noise, not real swings
@@ -354,11 +398,11 @@ export const scanForDivergences = (
     strength += indScore;
 
     // Component 3: Pivot spacing quality (5-15)
-    // Everything gets at least 5. Sweet spot 8-40 bars gets full 15.
+    // Everything gets at least 5. Sweet spot 12-50 bars gets full 15.
     const timeDelta = pivotSpacing;
-    if (timeDelta >= 8 && timeDelta <= 40) {
+    if (timeDelta >= 12 && timeDelta <= 50) {
       strength += 15; // Ideal spacing
-    } else if (timeDelta >= 4 && timeDelta <= 60) {
+    } else if (timeDelta >= 8 && timeDelta <= 60) {
       strength += 10; // Acceptable
     } else {
       strength += 5;  // Marginal
@@ -457,7 +501,8 @@ export const scanForDivergences = (
       isTriple,
       isStale,
       isTrendAligned,
-      description: `${isTriple ? 'Triple ' : ''}${signalType} on ${indicatorType}`
+      isMaturing,
+      description: `${isTriple ? 'Triple ' : ''}${isMaturing ? '(Maturing) ' : ''}${signalType} on ${indicatorType}`
     };
   };
 

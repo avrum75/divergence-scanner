@@ -731,6 +731,7 @@ const AlertPanel: React.FC<AlertPanelProps> = ({
                       {sig.isHidden && <span className="text-[8px] bg-amber-500/20 text-amber-400 px-1 rounded font-bold">HIDDEN</span>}
                       {sig.isTriple && <span className="text-[8px] bg-purple-500/20 text-purple-400 px-1 rounded font-bold">TRIPLE</span>}
                       {sig.isConfirmed && <span className="text-[8px] bg-cyan-500/20 text-cyan-400 px-1 rounded font-bold">CONFIRMED</span>}
+                      {sig.isMaturing && <span className="text-[8px] bg-orange-500/20 text-orange-400 px-1 rounded font-bold animate-pulse">MATURING</span>}
                       {sig.isStale && <span className="text-[8px] bg-slate-500/20 text-slate-400 px-1 rounded font-bold">STALE</span>}
                     </div>
                   </div>
