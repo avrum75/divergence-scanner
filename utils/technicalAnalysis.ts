@@ -206,9 +206,10 @@ export const scanForDivergences = (
   const currentEma = macroTrendEma[macroTrendEma.length - 1];
   const isUpTrend = currentPrice > currentEma;
 
-  // Minimum pivot spacing: pivots closer than this are likely the same swing
-  // Reduced from sensitivity*2 to sensitivity+1 to avoid over-filtering
-  const MIN_PIVOT_SPACING = Math.max(sensitivity + 1, 4);
+  // Minimum pivot spacing: pivots closer than this are likely the same swing.
+  // Use sensitivity*2 to ensure pivots represent distinct swings, not noise.
+  // With sensitivity=5 (1H), this gives 10 bars minimum = 10 hours between pivots.
+  const MIN_PIVOT_SPACING = Math.max(sensitivity * 2, 6);
 
   const findSignals = (type: 'bullish' | 'bearish'): any | null => {
     const isBullish = type === 'bullish';

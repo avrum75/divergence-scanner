@@ -783,9 +783,18 @@ export const scanMarket = async (watchlist: string[], sensitivity: number = 3): 
         const data = cachedData.data[tf];
         if (!data || data.length < 50) return;
 
+        // Scale sensitivity by timeframe: lower timeframes need larger pivot range
+        // to avoid detecting noise-level micro-dips as meaningful swing lows.
+        // 1H with range=3 only checks 3 hours — too noisy. Use 5 for 1H, 4 for 4H.
+        const tfSensitivity = tf === Timeframe.H1
+          ? Math.max(sensitivity + 2, 5)   // 1H: at least 5 bars (5 hours) each side
+          : tf === Timeframe.H4
+            ? Math.max(sensitivity + 1, 4) // 4H: at least 4 bars (16 hours) each side
+            : sensitivity;                 // D1: use base sensitivity as-is
+
         // scanForDivergences now returns an array of all signals found
-        const rsiDivs = scanForDivergences(data, IndicatorType.RSI, sensitivity);
-        const macdDivs = scanForDivergences(data, IndicatorType.MACD, sensitivity);
+        const rsiDivs = scanForDivergences(data, IndicatorType.RSI, tfSensitivity);
+        const macdDivs = scanForDivergences(data, IndicatorType.MACD, tfSensitivity);
 
         rsiSignalsByTf[tf] = rsiDivs;
         macdSignalsByTf[tf] = macdDivs;
