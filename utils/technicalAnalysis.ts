@@ -146,7 +146,7 @@ const findPivots = (values: number[], type: 'high' | 'low', range: number = 5, t
     if (isPivot) pivots.push(i);
   }
 
-  // De-duplicate pivots that are part of the same flat region:
+  // Phase 2: De-duplicate pivots that are part of the same flat region:
   // If two pivots are within `range` bars of each other, keep only the most extreme one
   const deduped: number[] = [];
   for (let k = 0; k < pivots.length; k++) {
@@ -170,7 +170,78 @@ const findPivots = (values: number[], type: 'high' | 'low', range: number = 5, t
       deduped.push(pivots[k]);
     }
   }
-  return deduped;
+
+  // Phase 3: Swing significance validation
+  // Merge pivots that are sub-peaks/sub-valleys of the same larger formation.
+  // Two consecutive pivots of the same type (both highs or both lows) are only
+  // considered separate formations if there's meaningful counter-movement between them.
+  // E.g., if RSI makes two peaks at 65 and 68 but only dips to 63 between them,
+  // that's ONE formation (peak=68), not two separate peaks.
+  if (deduped.length < 2) return deduped;
+
+  // Compute minimum swing depth as 10% of the data's range
+  let dataMin = Infinity, dataMax = -Infinity;
+  for (let m = 0; m < values.length; m++) {
+    if (!isNaN(values[m])) {
+      if (values[m] < dataMin) dataMin = values[m];
+      if (values[m] > dataMax) dataMax = values[m];
+    }
+  }
+  const dataRange = dataMax - dataMin;
+  const minSwingDepth = dataRange * 0.10; // 10% of full range
+
+  const validated: number[] = [];
+  for (let k = 0; k < deduped.length; k++) {
+    if (validated.length === 0) {
+      validated.push(deduped[k]);
+      continue;
+    }
+
+    const prevIdx = validated[validated.length - 1];
+    const currIdx = deduped[k];
+    const prevVal = values[prevIdx];
+    const currVal = values[currIdx];
+
+    // Find the extreme counter-movement between the two pivots
+    if (type === 'high') {
+      // For two high pivots: find the lowest point between them
+      let minBetween = Infinity;
+      for (let m = prevIdx + 1; m < currIdx; m++) {
+        if (!isNaN(values[m]) && values[m] < minBetween) minBetween = values[m];
+      }
+      // Swing depth = how far it dropped from the LOWER of the two peaks
+      const lowerPeak = Math.min(prevVal, currVal);
+      const swingDepth = lowerPeak - minBetween;
+
+      if (swingDepth < minSwingDepth) {
+        // Sub-peaks of the same formation — keep only the higher one
+        if (currVal > prevVal) {
+          validated[validated.length - 1] = currIdx;
+        }
+      } else {
+        validated.push(currIdx);
+      }
+    } else {
+      // For two low pivots: find the highest point between them
+      let maxBetween = -Infinity;
+      for (let m = prevIdx + 1; m < currIdx; m++) {
+        if (!isNaN(values[m]) && values[m] > maxBetween) maxBetween = values[m];
+      }
+      // Swing depth = how far it rose from the HIGHER of the two valleys
+      const higherValley = Math.max(prevVal, currVal);
+      const swingDepth = maxBetween - higherValley;
+
+      if (swingDepth < minSwingDepth) {
+        // Sub-valleys of the same formation — keep only the lower one
+        if (currVal < prevVal) {
+          validated[validated.length - 1] = currIdx;
+        }
+      } else {
+        validated.push(currIdx);
+      }
+    }
+  }
+  return validated;
 };
 
 /**
