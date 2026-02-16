@@ -315,40 +315,39 @@ export const scanForDivergences = (
 
     if (pricePivots.length < 2 || indPivots.length < 2) return null;
 
-    // Take more pivots for matching (5 instead of 3) to increase matching success
-    const pIndices = pricePivots.slice(-5);
-    const iIndices = indPivots.slice(-5);
-
-    // Match price pivots to nearest indicator pivot (closest match, no duplicates)
-    // Use a wider window for matching: allow indicator pivots within sensitivity+5 bars
-    // (indicator pivots often lag or lead price pivots by several bars)
+    // Always compare the last 2 consecutive price peaks — never skip a peak.
+    // Then find an indicator pivot near each. No match → no divergence.
     const matchWindow = sensitivity + 5;
-    const usedIndicatorPivots = new Set<number>();
-    const matchedPairs: { p: number, i: number }[] = [];
 
-    for (const p of pIndices) {
-      let bestMatch: number | null = null;
+    const lastP = pricePivots[pricePivots.length - 1];
+    const prevP = pricePivots[pricePivots.length - 2];
+    const tripleP = pricePivots.length >= 3 ? pricePivots[pricePivots.length - 3] : null;
+
+    // Find nearest indicator pivot within the match window
+    const findNearestInd = (pIdx: number): number | null => {
+      let best: number | null = null;
       let bestDist = Infinity;
-
-      for (const idx of iIndices) {
-        const dist = Math.abs(idx - p);
-        if (dist <= matchWindow && dist < bestDist && !usedIndicatorPivots.has(idx)) {
+      for (const idx of indPivots) {
+        const dist = Math.abs(idx - pIdx);
+        if (dist <= matchWindow && dist < bestDist) {
           bestDist = dist;
-          bestMatch = idx;
+          best = idx;
         }
       }
+      return best;
+    };
 
-      if (bestMatch !== null) {
-        usedIndicatorPivots.add(bestMatch);
-        matchedPairs.push({ p, i: bestMatch });
-      }
-    }
+    const lastI = findNearestInd(lastP);
+    const prevI = findNearestInd(prevP);
 
-    if (matchedPairs.length < 2) return null;
+    if (lastI === null || prevI === null) return null;
 
-    const last = matchedPairs[matchedPairs.length - 1];
-    const prev = matchedPairs[matchedPairs.length - 2];
-    const triple = matchedPairs.length >= 3 ? matchedPairs[matchedPairs.length - 3] : null;
+    const last = { p: lastP, i: lastI };
+    const prev = { p: prevP, i: prevI };
+    const triple = tripleP !== null ? (() => {
+      const ti = findNearestInd(tripleP);
+      return ti !== null ? { p: tripleP, i: ti } : null;
+    })() : null;
 
     // --- Early Detection: determine if last pivot is maturing ---
     const dataLength = priceData.length;
